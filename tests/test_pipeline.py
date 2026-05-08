@@ -1,0 +1,392 @@
+import os
+import tempfile
+import unittest
+
+from hype_radar.engine import HypeRadarEngine, ScanConfig
+from hype_radar.models import Candle, Instrument, LongShortRatio, OrderbookStats, Ticker
+from hype_radar.storage import RadarStore
+from hype_radar.token_intelligence import NullTokenIntelligenceClient, fundamentals_stage_payload, select_coingecko_identity
+
+
+def test_engine(**kwargs):
+    kwargs.setdefault("bybit", FakeBybit())
+    kwargs.setdefault("token_intelligence", NullTokenIntelligenceClient())
+    return HypeRadarEngine(**kwargs)
+
+
+def candles_from_closes(closes, volume=2000.0):
+    candles = []
+    for index, close in enumerate(closes):
+        previous = closes[index - 1] if index else close
+        candles.append(
+            Candle(
+                start_ms=index * 3600000,
+                open=previous,
+                high=max(previous, close) * 1.003,
+                low=min(previous, close) * 0.997,
+                close=close,
+                volume=volume,
+                turnover=volume * close,
+            )
+        )
+    return candles
+
+
+def ticker(symbol, price=1.0, pct24=0.12, turnover=5_000_000):
+    return Ticker(
+        symbol=symbol,
+        last_price=price,
+        bid_price=price * 0.999,
+        ask_price=price * 1.001,
+        price_24h_pct=pct24,
+        volume_24h=turnover / price,
+        turnover_24h=turnover,
+        funding_rate=0.0001,
+        open_interest=500_000,
+        open_interest_value=2_000_000,
+    )
+
+
+class FakeBybit:
+    def __init__(self):
+        self.closes = [1.0 + index * 0.0005 for index in range(180)] + [1.08]
+
+    def instruments_info(self):
+        return [
+            Instrument("BTCUSDT", "BTC", "USDT", "Trading", "LinearPerpetual", 1, 0.1),
+            Instrument("DWFUSDT", "DWF", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+            Instrument("DROPUSDT", "DROP", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+        ]
+
+    def tickers(self):
+        return [
+            ticker("BTCUSDT", price=100000, pct24=0.05, turnover=100_000_000),
+            ticker("DWFUSDT", price=self.closes[-1], pct24=0.12, turnover=8_000_000),
+            ticker("DROPUSDT", price=self.closes[-1], pct24=-0.18, turnover=9_000_000),
+        ]
+
+    def long_short_ratio(self, symbol, period="1h", category="linear"):
+        ratios = {
+            "DWFUSDT": LongShortRatio(symbol, 0.62, 0.38, 123456),
+            "DROPUSDT": LongShortRatio(symbol, 0.41, 0.59, 123456),
+        }
+        return ratios.get(symbol)
+
+    def klines(self, symbol, interval, limit=200, category="linear"):
+        candles = candles_from_closes(self.closes)
+        return candles[-limit:]
+
+    def orderbook(self, symbol, limit=50, category="linear"):
+        return OrderbookStats(4.0, 100_000, 120_000, 220_000)
+
+
+class FakeTokenIntelligence:
+    def __init__(self, payload_by_base):
+        self.payload_by_base = payload_by_base
+
+    def configured(self):
+        return True
+
+    def research(self, base_coin):
+        return self.payload_by_base[base_coin]
+
+
+class WindowFakeBybit(FakeBybit):
+    def instruments_info(self):
+        return [
+            Instrument("ALPHAUSDT", "ALPHA", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+            Instrument("BETAUSDT", "BETA", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+            Instrument("GAMMAUSDT", "GAMMA", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+            Instrument("OMEGAUSDT", "OMEGA", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+        ]
+
+    def tickers(self):
+        return [
+            ticker("ALPHAUSDT", price=101, pct24=0.50, turnover=8_000_000),
+            ticker("BETAUSDT", price=120, pct24=0.10, turnover=8_000_000),
+            ticker("GAMMAUSDT", price=95, pct24=-0.10, turnover=8_000_000),
+            ticker("OMEGAUSDT", price=80, pct24=-0.50, turnover=8_000_000),
+        ]
+
+    def klines(self, symbol, interval, limit=200, category="linear"):
+        closes_by_symbol = {
+            "ALPHAUSDT": [100, 101],
+            "BETAUSDT": [100, 120],
+            "GAMMAUSDT": [100, 95],
+            "OMEGAUSDT": [100, 80],
+        }
+        return candles_from_closes(closes_by_symbol[symbol], volume=2000.0)[-limit:]
+
+
+def token_payload(base, coin_id="token", circ=80, total=100, market_cap=100_000_000, fdv=300_000_000, volume=15_000_000):
+    return {
+        "base_coin": base,
+        "identity": {
+            "coin_id": coin_id,
+            "symbol": base,
+            "name": "%s Token" % base,
+            "confidence": 0.95,
+            "reason": "Exact ticker match.",
+        },
+        "coingecko": {
+            "coin_data": {
+                "categories": ["Artificial Intelligence"],
+                "description": {"en": "%s narrative token." % base},
+                "links": {"homepage": ["https://example.com/%s" % base.lower()]},
+                "market_data": {
+                    "market_cap": {"usd": market_cap},
+                    "fully_diluted_valuation": {"usd": fdv},
+                    "total_volume": {"usd": volume},
+                    "circulating_supply": circ,
+                    "total_supply": total,
+                },
+                "platforms": {},
+            },
+            "market": [
+                {
+                    "id": coin_id,
+                    "market_cap": market_cap,
+                    "fully_diluted_valuation": fdv,
+                    "total_volume": volume,
+                    "circulating_supply": circ,
+                    "total_supply": total,
+                }
+            ],
+            "trending": {"coins": [{"item": {"id": coin_id}}]},
+            "categories": [{"name": "Artificial Intelligence", "market_cap_change_24h": 5}],
+        },
+        "errors": [],
+    }
+
+
+class PipelineTests(unittest.TestCase):
+    def setUp(self):
+        os.environ.pop("ENABLE_BLACKLIST_FILTER", None)
+
+    def test_rejected_symbol_stays_visible_without_blacklist_stage(self):
+        report = test_engine().scan(
+            ScanConfig(top=5, max_symbols=2, min_turnover_24h=1_000_000, workers=1)
+        )
+        by_symbol = {candidate.symbol: candidate for candidate in report.all_candidates}
+
+        self.assertIn("BTCUSDT", by_symbol)
+        self.assertTrue(by_symbol["BTCUSDT"].is_rejected)
+        self.assertEqual(by_symbol["BTCUSDT"].failed_stage, "market_scan")
+
+        dwf = by_symbol["DWFUSDT"]
+        self.assertFalse(any(stage.stage == "blacklist_screen" for stage in dwf.stages))
+
+    def test_top_lists_are_selected_by_24h_gainers_and_losers(self):
+        report = test_engine().scan(
+            ScanConfig(top=1, max_symbols=2, min_turnover_24h=1_000_000, workers=1)
+        )
+
+        self.assertEqual([candidate.symbol for candidate in report.top_long], ["DWFUSDT"])
+        self.assertEqual([candidate.symbol for candidate in report.top_short_watch], ["DROPUSDT"])
+        self.assertEqual(report.top_long[0].rank_bucket, "top_24h_gainer")
+        self.assertEqual(report.top_short_watch[0].rank_bucket, "top_24h_loser")
+
+    def test_market_scan_can_rank_by_custom_1h_window(self):
+        report = HypeRadarEngine(
+            bybit=WindowFakeBybit(),
+            token_intelligence=NullTokenIntelligenceClient(),
+        ).market_scan(ScanConfig(top=1, min_turnover_24h=1_000_000, window_hours=1, workers=1))
+        payload = report.to_dict()
+        gainers = payload["top_gainers_pipeline"]
+        losers = payload["top_losers_pipeline"]
+
+        self.assertEqual(gainers[0]["symbol"], "BETAUSDT")
+        self.assertEqual(losers[0]["symbol"], "OMEGAUSDT")
+        gainer_selection = [stage for stage in gainers[0]["stages"] if stage["stage"] == "initial_selection"][0]
+        loser_selection = [stage for stage in losers[0]["stages"] if stage["stage"] == "initial_selection"][0]
+        self.assertEqual(gainer_selection["metrics"]["bucket"], "top_1h_gainer")
+        self.assertEqual(loser_selection["metrics"]["bucket"], "top_1h_loser")
+        self.assertEqual(gainer_selection["metrics"]["scan_window_hours"], 1)
+        self.assertAlmostEqual(gainer_selection["metrics"]["price_change_window_pct"], 0.20)
+
+    def test_market_scan_does_not_run_full_research_until_requested(self):
+        engine = test_engine()
+        report = engine.market_scan(ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
+        gainers = report.to_dict()["top_gainers_24h_pipeline"]
+
+        self.assertEqual(gainers[0]["symbol"], "DWFUSDT")
+        self.assertIsNone(gainers[0]["candidate"])
+        selection = [stage for stage in gainers[0]["stages"] if stage["stage"] == "initial_selection"][0]
+        self.assertIsNotNone(selection["metrics"]["volume_change_24h_pct"])
+        self.assertEqual(selection["metrics"]["scan_window_hours"], 24)
+        self.assertEqual(selection["metrics"]["price_change_window_pct"], selection["metrics"]["price_24h_pct"])
+        self.assertEqual(selection["metrics"]["funding_rate"], 0.0001)
+        self.assertEqual(selection["metrics"]["open_interest_value"], 2_000_000)
+        self.assertEqual(selection["metrics"]["long_ratio"], 0.62)
+        self.assertEqual(selection["metrics"]["short_ratio"], 0.38)
+
+        researched = engine.research_symbol("DWFUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
+        self.assertIsNotNone(researched.candidate)
+        self.assertTrue(any(stage.stage == "technical_analysis" for stage in researched.stages))
+        fundamentals = [stage for stage in researched.stages if stage.stage == "fundamentals"][0]
+        manipulation = [stage for stage in researched.stages if stage.stage == "manipulation_detector"][0]
+        self.assertEqual(fundamentals.metrics["circulating_supply_warn_threshold"], 0.30)
+        self.assertNotIn("blacklist_risk_score", manipulation.metrics)
+
+    def test_coingecko_identity_prefers_exact_symbol_over_rank(self):
+        identity = select_coingecko_identity(
+            "B3",
+            {
+                "coins": [
+                    {"id": "baby-b3", "symbol": "BABYB3", "name": "Baby B3", "market_cap_rank": 1},
+                    {"id": "b3", "symbol": "b3", "name": "B3", "market_cap_rank": 500},
+                ]
+            },
+        )
+
+        self.assertEqual(identity.coin_id, "b3")
+        self.assertGreaterEqual(identity.confidence, 0.9)
+
+    def test_fundamentals_can_pass_with_coingecko_when_lunarcrush_is_missing(self):
+        intelligence = FakeTokenIntelligence({"DWF": token_payload("DWF", coin_id="dwf-token")})
+        researched = HypeRadarEngine(
+            bybit=FakeBybit(),
+            token_intelligence=intelligence,
+        ).research_symbol("DWFUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
+
+        fundamentals = [stage for stage in researched.stages if stage.stage == "fundamentals"][0]
+        self.assertEqual(fundamentals.status, "pass")
+        self.assertEqual(fundamentals.metrics["fundamental_label"], "Живой нарратив")
+        self.assertEqual(fundamentals.metrics["data_coverage"], "coingecko_only")
+        self.assertIn("trend_label", fundamentals.metrics)
+
+    def test_low_float_marks_fundamentals_weak_and_feeds_manipulation_risk(self):
+        payload = token_payload("DROP", coin_id="drop-token", circ=20, total=100, market_cap=10_000_000, fdv=120_000_000, volume=200_000)
+        intelligence = FakeTokenIntelligence({"DROP": payload})
+        researched = HypeRadarEngine(
+            bybit=FakeBybit(),
+            token_intelligence=intelligence,
+        ).research_symbol("DROPUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
+
+        fundamentals = [stage for stage in researched.stages if stage.stage == "fundamentals"][0]
+        manipulation = [stage for stage in researched.stages if stage.stage == "manipulation_detector"][0]
+
+        self.assertEqual(fundamentals.status, "warn")
+        self.assertEqual(fundamentals.metrics["fundamental_label"], "Спекулятивный памп")
+        self.assertLess(fundamentals.metrics["circulating_supply_ratio"], 0.30)
+        self.assertEqual(fundamentals.metrics["tokenomics_risk_level"], "высокий")
+        self.assertFalse(any(stage.stage == "blacklist_screen" for stage in researched.stages))
+        self.assertNotIn("blacklist_risk_score", manipulation.metrics)
+        self.assertEqual(manipulation.metrics["circulating_supply_ratio"], fundamentals.metrics["circulating_supply_ratio"])
+
+    def test_low_float_and_extreme_volume_are_not_marked_as_clean_fundamental_strength(self):
+        payload = token_payload(
+            "NIL",
+            coin_id="nil-token",
+            circ=24,
+            total=100,
+            market_cap=205_000_000,
+            fdv=855_000_000,
+            volume=266_000_000,
+        )
+        fundamentals = fundamentals_stage_payload(payload, ["market_anomaly", "volume_spike"])
+
+        self.assertEqual(fundamentals["status"], "warn")
+        self.assertNotEqual(fundamentals["metrics"]["fundamental_label"], "Живой нарратив")
+        self.assertEqual(fundamentals["metrics"]["fundamental_label"], "Спекулятивный памп")
+        self.assertGreater(fundamentals["metrics"]["volume_to_market_cap"], 1.0)
+        self.assertTrue(any("Vol/MC" in flag for flag in fundamentals["metrics"]["red_flags"]))
+        self.assertTrue(any("Циркуляция" in flag for flag in fundamentals["metrics"]["red_flags"]))
+        self.assertLessEqual(len(fundamentals["metrics"]["project_brief_ru"]), 500)
+
+    def test_lunarcrush_context_feeds_fundamental_thesis(self):
+        payload = token_payload("B3", coin_id="b3-token")
+        payload["lunarcrush"] = {
+            "data": {
+                "ai_summary": {
+                    "summary": "B3 is a gaming infrastructure project with rising community attention.",
+                    "whatsup": "Mentions accelerated after a game ecosystem announcement.",
+                    "supportive": [{"title": "Gaming narrative expanding"}],
+                    "critical": [{"title": "Unlock discussion is active"}],
+                },
+                "metrics": {"social_growth": 82, "galaxy_score": 78},
+                "top_topics": [{"name": "Gaming"}],
+                "alerts": [{"title": "Social volume spike"}],
+            }
+        }
+
+        fundamentals = fundamentals_stage_payload(payload, ["market_anomaly"])
+
+        self.assertEqual(fundamentals["metrics"]["trend_source"], "CoinGecko category")
+        self.assertEqual(fundamentals["metrics"]["trend_label"], "Artificial Intelligence")
+        self.assertEqual(fundamentals["metrics"]["social_topic"], "Gaming")
+        self.assertIn("game ecosystem announcement", fundamentals["metrics"]["why_moved"])
+        self.assertTrue(any("Gaming narrative" in item for item in fundamentals["metrics"]["movement_supportive"]))
+        self.assertTrue(any("Unlock discussion" in item for item in fundamentals["metrics"]["movement_suspicious"]))
+        self.assertTrue(all("Тикер уверенно" not in item for item in fundamentals["metrics"]["movement_supportive"]))
+
+    def test_coingecko_taxonomy_wins_over_lunarcrush_social_topic_conflict(self):
+        payload = token_payload("STRK", coin_id="starknet")
+        payload["coingecko"]["coin_data"]["categories"] = ["Layer 2 (L2)", "Ethereum Ecosystem"]
+        payload["coingecko"]["coin_data"]["description"]["en"] = (
+            "Starknet is a permissionless Ethereum Layer 2 validity rollup using STARK proofs."
+        )
+        payload["coingecko"]["coin_data"]["platforms"] = {"ethereum": "0x123"}
+        payload["lunarcrush"] = {
+            "data": {
+                "top_topics": [{"name": "coins solana ecosystem"}],
+                "metrics": {"social_growth": 12, "galaxy_score": 42},
+            }
+        }
+
+        fundamentals = fundamentals_stage_payload(payload, ["market_anomaly"])
+        metrics = fundamentals["metrics"]
+
+        self.assertEqual(metrics["sector"], "Layer 2 (L2)")
+        self.assertEqual(metrics["chain_ecosystem"], "ethereum")
+        self.assertEqual(metrics["trend_label"], "Layer 2 (L2)")
+        self.assertEqual(metrics["trend_source"], "CoinGecko category")
+        self.assertIn("solana", metrics["social_topic"].lower())
+        self.assertIn("coingecko", metrics["source_conflict"].lower())
+
+    def test_weak_social_fixture_does_not_emit_old_acceleration_stage(self):
+        payload = token_payload("B3", coin_id="b3-token")
+        payload["lunarcrush"] = {
+            "data": {
+                "metrics": {"social_growth": 5, "galaxy_score": 25},
+                "top_topics": [{"name": "Gaming"}],
+            }
+        }
+
+        fundamentals = fundamentals_stage_payload(payload, ["market_anomaly"])
+        metrics = fundamentals["metrics"]
+
+        self.assertNotIn("trend_stage", metrics)
+        self.assertNotEqual(metrics["attention_phase"], "разгон")
+
+    def test_pump_group_text_does_not_create_blacklist_stage(self):
+        payload = token_payload("DROP", coin_id="drop-token")
+        payload["coingecko"]["coin_data"]["description"]["en"] = "Promoted by a pump group."
+        intelligence = FakeTokenIntelligence({"DROP": payload})
+        researched = HypeRadarEngine(
+            bybit=FakeBybit(),
+            token_intelligence=intelligence,
+        ).research_symbol("DROPUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
+
+        self.assertFalse(any(stage.stage == "blacklist_screen" for stage in researched.stages))
+
+    def test_sqlite_history_round_trip(self):
+        report = test_engine().scan(
+            ScanConfig(top=5, max_symbols=2, min_turnover_24h=1_000_000, workers=1)
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = RadarStore(tmpdir + "/radar.sqlite3")
+            store.save_report(report)
+            latest = store.latest_report()
+            runs = store.list_runs()
+            candidate = store.get_candidate(report.run.run_id, "DWFUSDT")
+            stages = store.get_stages(report.run.run_id)
+
+        self.assertIsNotNone(latest)
+        self.assertEqual(len(runs), 1)
+        self.assertIsNotNone(candidate)
+        self.assertFalse(any(stage["stage"] == "blacklist_screen" for stage in stages))
+
+
+if __name__ == "__main__":
+    unittest.main()

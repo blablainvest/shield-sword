@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Щит&amp;Меч</title>
+    <link rel="stylesheet" href="/styles.css?v=20" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="nav">
+        <div class="brand">
+          <img class="brand-logo" src="/assets/shield-sword-logo.png" alt="" />
+          <span>Щит&amp;Меч</span>
+        </div>
+        <div class="nav-section">
+          <div class="nav-section-title">Щит</div>
+          <button class="nav-item active" data-view="live">Сканер</button>
+          <button class="nav-item" data-view="pipeline">Пайплайн</button>
+          <button class="nav-item" data-view="backtests">Бэктесты</button>
+        </div>
+        <div class="nav-section nav-section-soon">
+          <div class="nav-section-title">Меч <span class="soon-pill">Soon</span></div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Сканер</h1>
+          </div>
+          <div class="actions scan-actions">
+            <label title="Сколько лидеров роста и падения показывать за выбранный период. По умолчанию: 5 вверх и 5 вниз.">Сколько монет искать <input id="maxSymbols" type="number" value="5" min="1" max="20" /></label>
+            <label title="Период изменения цены и объема для топа роста и падения. Мин. объем остается фильтром за 24ч.">Период
+              <select id="scanWindow">
+                <option value="1">1ч</option>
+                <option value="2">2ч</option>
+                <option value="3">3ч</option>
+                <option value="4">4ч</option>
+                <option value="5">5ч</option>
+                <option value="6">6ч</option>
+                <option value="7">7ч</option>
+                <option value="8">8ч</option>
+                <option value="9">9ч</option>
+                <option value="10">10ч</option>
+                <option value="11">11ч</option>
+                <option value="12">12ч</option>
+                <option value="13">13ч</option>
+                <option value="14">14ч</option>
+                <option value="15">15ч</option>
+                <option value="16">16ч</option>
+                <option value="17">17ч</option>
+                <option value="18">18ч</option>
+                <option value="19">19ч</option>
+                <option value="20">20ч</option>
+                <option value="21">21ч</option>
+                <option value="22">22ч</option>
+                <option value="23">23ч</option>
+                <option value="24" selected>24ч</option>
+              </select>
+            </label>
+            <label title="Минимальный объем торгов за 24ч в миллионах USDT. Например: 2 = $2,000,000.">Мин. объем 24ч, $M <input id="minVolume" type="number" value="2" min="0" step="0.5" /></label>
+            <button id="runScan">Запустить скан</button>
+          </div>
+        </header>
+
+        <section class="stats" id="stats"></section>
+
+        <section class="view active" id="view-live">
+          <div class="split">
+            <section>
+              <h2 id="topLongTitle">Топ роста за 24ч</h2>
+              <div class="table-wrap"><table id="topLong"></table></div>
+            </section>
+            <section>
+              <h2 id="topShortTitle">Топ падения за 24ч</h2>
+              <div class="table-wrap"><table id="topShort"></table></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-pipeline">
+          <div class="pipeline-toolbar">
+            <label title="Поиск прошлых карточек исследования по тикеру.">Тикер <input id="pipelineSearch" type="search" placeholder="B3USDT" /></label>
+          </div>
+          <div id="pipelineBoard" class="pipeline-board"></div>
+        </section>
+
+        <section class="view" id="view-backtests">
+          <div class="backtest-toolbar">
+            <label title="Фильтр прошлых исследований по тикеру.">Тикер <input id="backtestSearch" type="search" placeholder="B3USDT" /></label>
+            <label title="Фильтр по типу торгового вывода.">Сетап
+              <select id="backtestSetupFilter">
+                <option value="all">Все</option>
+                <option value="long">Long setup</option>
+                <option value="short">Short setup</option>
+                <option value="none">Нет сетапа</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap"><table id="backtestTable"></table></div>
+        </section>
+
+      </main>
+    </div>
+
+    <aside id="drawer" class="drawer">
+      <button id="closeDrawer" class="close">Закрыть</button>
+      <div id="drawerContent"></div>
+    </aside>
+
+    <script src="/app.js?v=20"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bybit-altcoin-hype-radar"
+version = "0.1.0"
+description = "Read-only high-volatility Bybit altcoin long/short opportunity scanner."
+requires-python = ">=3.9"
+authors = [{ name = "Bybit Trader" }]
+dependencies = []
+
+[project.scripts]
+hype-radar = "hype_radar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hype_radar = ["web/*.html", "web/*.css", "web/*.js"]
