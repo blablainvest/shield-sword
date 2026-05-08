@@ -17,4 +17,7 @@ hype-radar = "hype_radar.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hype_radar = ["web/*.html", "web/*.css", "web/*.js"]
+hype_radar = ["web/*.html", "web/*.css", "web/*.js", "web/assets/*.png"]
+
+[tool.vercel]
+entrypoint = "server.py"
