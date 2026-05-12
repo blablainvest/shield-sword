@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import base64
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .http import JsonHttpClient
 
@@ -16,7 +16,7 @@ class CoinGeckoClient:
         self.base_url = "https://api.coingecko.com/api/v3"
 
     def search(self, query: str) -> Dict[str, Any]:
-        return self.http.get_json(self.base_url + "/search", {"query": query})
+        return self.http.get_json(self.base_url + "/search", self._params({"query": query}))
 
     def coin(self, coin_id: str) -> Dict[str, Any]:
         params = {
@@ -27,10 +27,32 @@ class CoinGeckoClient:
             "developer_data": "true",
             "sparkline": "false",
         }
-        headers_key = self.api_key
-        if headers_key:
-            params["x_cg_demo_api_key"] = headers_key
-        return self.http.get_json(self.base_url + "/coins/" + coin_id, params)
+        return self.http.get_json(self.base_url + "/coins/" + coin_id, self._params(params))
+
+    def markets(self, coin_id: str) -> List[Dict[str, Any]]:
+        payload = self.http.get_json(
+            self.base_url + "/coins/markets",
+            self._params(
+                {
+                    "vs_currency": "usd",
+                    "ids": coin_id,
+                    "price_change_percentage": "24h,7d",
+                }
+            ),
+        )
+        return payload if isinstance(payload, list) else []
+
+    def trending(self) -> Dict[str, Any]:
+        return self.http.get_json(self.base_url + "/search/trending", self._params({}))
+
+    def categories(self) -> List[Dict[str, Any]]:
+        payload = self.http.get_json(self.base_url + "/coins/categories", self._params({}))
+        return payload if isinstance(payload, list) else []
+
+    def _params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        if self.api_key:
+            return {**params, "x_cg_demo_api_key": self.api_key}
+        return params
 
 
 class GdeltClient:

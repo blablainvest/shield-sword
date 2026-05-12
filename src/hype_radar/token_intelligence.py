@@ -11,6 +11,8 @@ from html import unescape
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
+from .integrations import CoinGeckoClient
+
 
 class TokenIntelligenceClient(Protocol):
     def configured(self) -> bool:
@@ -126,16 +128,22 @@ class MppTokenIntelligenceClient:
         self.coingecko_url = os.getenv("MPP_COINGECKO_URL") or "https://coingecko.mpp.paywithlocus.com"
         self.lunarcrush_url = os.getenv("LUNARCRUSH_URL") or "https://lunarcrush.com/api4"
         self.lunarcrush_key = os.getenv("LUNARCRUSH_API_KEY") or ""
+        self.direct_coingecko = CoinGeckoClient()
         explicit = os.getenv("ENABLE_MPP_ENRICHMENT")
         self.enabled = explicit is None or explicit.lower() not in {"0", "false", "no", "off"}
 
     def configured(self) -> bool:
-        return self.enabled and bool(shutil.which(self.tempo_bin) or os.path.exists(self.tempo_bin))
+        return self.enabled
 
     def research(self, base_coin: str) -> Dict[str, Any]:
         if not self.configured():
-            raise RuntimeError("MPP enrichment is disabled or Tempo CLI is unavailable.")
+            raise RuntimeError("Token intelligence enrichment is disabled.")
 
+        if self._tempo_configured():
+            return self._research_via_mpp(base_coin)
+        return self._research_direct(base_coin)
+
+    def _research_via_mpp(self, base_coin: str) -> Dict[str, Any]:
         errors: List[str] = []
         search = self._safe_post(self.coingecko_url, "/coingecko/search", {"query": base_coin}, errors)
         identity = select_coingecko_identity(base_coin, search)
@@ -143,7 +151,7 @@ class MppTokenIntelligenceClient:
             return {
                 "base_coin": base_coin,
                 "identity": identity.__dict__,
-                "coingecko": {"search": search},
+                "coingecko": {"search": search, "provider": "mpp"},
                 "lunarcrush": self._lunarcrush_research(base_coin, errors),
                 "errors": errors,
             }
@@ -163,6 +171,7 @@ class MppTokenIntelligenceClient:
             "base_coin": base_coin,
             "identity": identity.__dict__,
             "coingecko": {
+                "provider": "mpp",
                 "search": search,
                 "coin_data": coin_data,
                 "market": market,
@@ -172,6 +181,43 @@ class MppTokenIntelligenceClient:
             "lunarcrush": lunarcrush,
             "errors": errors,
         }
+
+    def _research_direct(self, base_coin: str) -> Dict[str, Any]:
+        errors: List[str] = []
+        search = self._safe_direct("coingecko/search", lambda: self.direct_coingecko.search(base_coin), errors)
+        identity = select_coingecko_identity(base_coin, search)
+        lunarcrush = self._lunarcrush_research(base_coin, errors)
+        if not identity.coin_id:
+            return {
+                "base_coin": base_coin,
+                "identity": identity.__dict__,
+                "coingecko": {"provider": "direct", "search": search},
+                "lunarcrush": lunarcrush,
+                "errors": errors,
+            }
+
+        coin_data = self._safe_direct("coingecko/coin", lambda: self.direct_coingecko.coin(identity.coin_id or ""), errors)
+        market = self._safe_direct("coingecko/markets", lambda: self.direct_coingecko.markets(identity.coin_id or ""), errors)
+        trending = self._safe_direct("coingecko/trending", self.direct_coingecko.trending, errors)
+        categories = self._safe_direct("coingecko/categories", self.direct_coingecko.categories, errors)
+
+        return {
+            "base_coin": base_coin,
+            "identity": identity.__dict__,
+            "coingecko": {
+                "provider": "direct",
+                "search": search,
+                "coin_data": coin_data,
+                "market": market,
+                "trending": trending,
+                "categories": categories,
+            },
+            "lunarcrush": lunarcrush,
+            "errors": errors,
+        }
+
+    def _tempo_configured(self) -> bool:
+        return bool(shutil.which(self.tempo_bin) or os.path.exists(self.tempo_bin))
 
     def _lunarcrush_research(self, base_coin: str, errors: List[str]) -> Dict[str, Any]:
         if not self.lunarcrush_key:
@@ -223,6 +269,13 @@ class MppTokenIntelligenceClient:
             return self._tempo_post(base_url, path, params)
         except Exception as exc:  # noqa: BLE001 - optional enrichment must degrade per endpoint.
             errors.append("%s: %s" % (path, exc))
+            return {}
+
+    def _safe_direct(self, name: str, callback: Any, errors: List[str]) -> Any:
+        try:
+            return callback()
+        except Exception as exc:  # noqa: BLE001 - optional enrichment must degrade per endpoint.
+            errors.append("%s: %s" % (name, exc))
             return {}
 
     def _tempo_post(self, base_url: str, path: str, params: Dict[str, Any]) -> Any:
@@ -357,6 +410,7 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     circ_ratio = circulating / total_supply if circulating and total_supply and total_supply > 0 else None
     fdv_to_market_cap = fdv / market_cap if fdv and market_cap and market_cap > 0 else None
     volume_to_market_cap = volume / market_cap if volume and market_cap and market_cap > 0 else None
+    cap_tier = market_cap_tier(market_cap)
     trending_ids = trending_coin_ids(coingecko.get("trending"))
     category_momentum = category_momentum_score(categories, coingecko.get("categories"))
     lunar_metrics = extract_lunarcrush_metrics(token_data.get("lunarcrush") or {})
@@ -417,6 +471,9 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "contract_address": address,
         "categories": categories[:8],
         "market_cap": market_cap,
+        "market_cap_tier": cap_tier["tier"],
+        "market_cap_tier_label": cap_tier["label"],
+        "market_cap_tier_reason": cap_tier["reason"],
         "fdv": fdv,
         "fdv_to_market_cap": fdv_to_market_cap,
         "volume_24h": volume,
@@ -491,6 +548,45 @@ def classify_fundamental(metrics: Dict[str, Any]) -> tuple[str, str]:
     if narrative >= 55 and project_score >= 50:
         return "Живой нарратив", "pass"
     return "Слабая база", "warn"
+
+
+def market_cap_tier(market_cap: Optional[float]) -> Dict[str, str]:
+    value = first_number(market_cap)
+    if value is None or value <= 0:
+        return {
+            "tier": "unknown",
+            "label": "Капитализация: нет данных",
+            "reason": "CoinGecko не дал market cap.",
+        }
+    if value < 50_000_000:
+        return {
+            "tier": "tiny",
+            "label": "Tiny cap / крошечная",
+            "reason": "Market cap ниже $50M: очень малая капитализация, максимальная чувствительность к манипуляциям.",
+        }
+    if value < 100_000_000:
+        return {
+            "tier": "low",
+            "label": "Low cap / мелкая",
+            "reason": "Market cap от $50M до $100M: мелкая капитализация, выше риск манипуляций.",
+        }
+    if value < 1_000_000_000:
+        return {
+            "tier": "mid",
+            "label": "Mid cap / средняя",
+            "reason": "Market cap от $100M до $1B.",
+        }
+    if value < 10_000_000_000:
+        return {
+            "tier": "big",
+            "label": "Big cap / крупная",
+            "reason": "Market cap от $1B до $10B.",
+        }
+    return {
+        "tier": "giant",
+        "label": "Giant cap / гигант",
+        "reason": "Market cap от $10B и выше.",
+    }
 
 
 def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:

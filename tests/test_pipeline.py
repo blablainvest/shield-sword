@@ -1,11 +1,12 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from hype_radar.engine import HypeRadarEngine, ScanConfig
 from hype_radar.models import Candle, Instrument, LongShortRatio, OrderbookStats, Ticker
 from hype_radar.storage import RadarStore
-from hype_radar.token_intelligence import NullTokenIntelligenceClient, fundamentals_stage_payload, select_coingecko_identity
+from hype_radar.token_intelligence import NullTokenIntelligenceClient, fundamentals_stage_payload, market_cap_tier, select_coingecko_identity
 
 
 def test_engine(**kwargs):
@@ -254,6 +255,24 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(fundamentals.metrics["fundamental_label"], "Живой нарратив")
         self.assertEqual(fundamentals.metrics["data_coverage"], "coingecko_only")
         self.assertIn("trend_label", fundamentals.metrics)
+        self.assertEqual(fundamentals.metrics["market_cap_tier"], "mid")
+        self.assertEqual(fundamentals.metrics["market_cap_tier_label"], "Mid cap / средняя")
+
+    def test_market_cap_tier_boundaries(self):
+        cases = [
+            (49_000_000, "tiny"),
+            (50_000_000, "low"),
+            (99_000_000, "low"),
+            (100_000_000, "mid"),
+            (999_000_000, "mid"),
+            (1_000_000_000, "big"),
+            (10_000_000_000, "giant"),
+            (None, "unknown"),
+        ]
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(market_cap_tier(value)["tier"], expected)
 
     def test_low_float_marks_fundamentals_weak_and_feeds_manipulation_risk(self):
         payload = token_payload("DROP", coin_id="drop-token", circ=20, total=100, market_cap=10_000_000, fdv=120_000_000, volume=200_000)
@@ -386,6 +405,33 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertIsNotNone(candidate)
         self.assertFalse(any(stage["stage"] == "blacklist_screen" for stage in stages))
+
+    def test_repeated_research_is_append_only_and_stale_after_24h(self):
+        researched = test_engine().research_symbol(
+            "DWFUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1)
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = RadarStore(tmpdir + "/radar.sqlite3")
+            first = store.save_research("manual", researched)
+            second = store.save_research("manual", researched)
+
+            self.assertNotEqual(first["research_id"], second["research_id"])
+            cards = store.list_research()
+            self.assertEqual(len(cards), 2)
+            self.assertEqual([card["research_id"] for card in cards], [second["research_id"], first["research_id"]])
+
+            stale_created_at = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+            with store._connect() as conn:
+                conn.execute(
+                    "UPDATE research_cards SET created_at = ? WHERE id = ?",
+                    (stale_created_at, first["research_id"]),
+                )
+
+            cards = store.list_research()
+            by_id = {card["research_id"]: card for card in cards}
+            self.assertFalse(by_id[second["research_id"]]["is_stale_after_24h"])
+            self.assertTrue(by_id[first["research_id"]]["is_stale_after_24h"])
+            self.assertGreaterEqual(by_id[first["research_id"]]["research_age_hours"], 24)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ async function loadResearchCards() {
   const response = await fetch("/api/research");
   if (!response.ok) return;
   const payload = await response.json();
-  researchCards = payload.research || [];
+  researchCards = sortResearchCards(payload.research || []);
   renderPipelineBoard();
   renderBacktestTable();
 }
@@ -83,15 +83,15 @@ async function runResearch(symbol, button) {
   try {
     const response = await fetch(`/api/research/run?symbol=${encodeURIComponent(symbol)}&min_volume=${minVolume}&window_hours=${windowHours}`, { method: "POST" });
     const card = await response.json();
-    researchCards = [card, ...researchCards.filter((item) => item.symbol !== card.symbol)];
+    researchCards = sortResearchCards([card, ...researchCards]);
     selectedView = "pipeline";
     activateView("pipeline");
     render();
-    openResearchCard(card.symbol);
+    openResearchCard(card.symbol, card.run_id, card.research_id);
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = hasResearch(symbol) ? "Открыть исследование" : "Запустить исследование";
+      applyResearchActionState(button, symbol);
     }
   }
 }
@@ -102,16 +102,18 @@ function render() {
     const hours = reportWindowHours();
     const run = currentReport.run || {};
     const summary = run.summary || {};
+    const topRows = limitedMoverRows(currentReport.top_gainers_pipeline || currentReport.top_gainers_24h_pipeline || []);
+    const bottomRows = limitedMoverRows(currentReport.top_losers_pipeline || currentReport.top_losers_24h_pipeline || []);
     document.getElementById("topLongTitle").textContent = `Топ роста за ${hours}ч`;
     document.getElementById("topShortTitle").textContent = `Топ падения за ${hours}ч`;
     document.getElementById("stats").innerHTML = [
       stat("Всего", summary.total_symbols),
       stat("Подходит", summary.eligible_symbols),
-      stat("Выбрано", summary.scanned_symbols),
+      stat("Выбрано", topRows.length + bottomRows.length),
       stat("Ошибки", summary.errors)
     ].join("");
-    renderMoverTable("topLong", currentReport.top_gainers_pipeline || currentReport.top_gainers_24h_pipeline || [], hours);
-    renderMoverTable("topShort", currentReport.top_losers_pipeline || currentReport.top_losers_24h_pipeline || [], hours);
+    renderMoverTable("topLong", topRows, hours);
+    renderMoverTable("topShort", bottomRows, hours);
   }
   renderPipelineBoard();
   renderBacktestTable();
@@ -134,6 +136,17 @@ function reportWindowHours() {
   return Math.min(24, Math.max(1, Math.round(value || 24)));
 }
 
+function topLimit() {
+  const fieldValue = Number(document.getElementById("maxSymbols")?.value);
+  const reportValue = Number(currentReport?.run?.config?.top);
+  const value = Number.isFinite(fieldValue) && fieldValue > 0 ? fieldValue : reportValue;
+  return Math.max(1, Math.round(value || 5));
+}
+
+function limitedMoverRows(rows) {
+  return (rows || []).slice(0, topLimit());
+}
+
 function syncScanWindowFromReport() {
   const select = document.getElementById("scanWindow");
   if (!select || !currentReport) return;
@@ -145,12 +158,11 @@ function stat(label, value) {
 }
 
 function renderMoverTable(id, rows, hours = reportWindowHours()) {
-  const sortedRows = sortMoverRows(rows, id);
+  const sortedRows = limitedMoverRows(sortMoverRows(rows, id));
   const body = sortedRows.map((item) => {
     const metrics = marketMetrics(item);
     const symbol = item.symbol;
-    const researched = hasResearch(symbol);
-    const actionLabel = researched ? "Открыть" : "Исследовать";
+    const action = researchActionFor(symbol);
     return `<tr data-symbol="${symbol}">
       <td><a class="symbol-link" href="${bybitUrl(symbol)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${symbol}</a></td>
       <td class="num">${pct(metrics.price_change_pct) || "—"}</td>
@@ -158,7 +170,7 @@ function renderMoverTable(id, rows, hours = reportWindowHours()) {
       <td class="num">${pct(metrics.funding_rate) || "н/д"}</td>
       <td class="num">${money(metrics.open_interest_value)}</td>
       <td class="num">${longShort(metrics.long_ratio, metrics.short_ratio)}</td>
-      <td><button class="research-action" data-symbol="${symbol}" title="${researched ? "Открыть исследование" : "Запустить исследование"}">${actionLabel}</button></td>
+      <td><button class="research-action" data-symbol="${symbol}" title="${action.title}">${action.label}</button></td>
     </tr>`;
   }).join("");
   document.getElementById(id).innerHTML = moverTableHead(hours) + `<tbody>${body || emptyRow(7)}</tbody>`;
@@ -172,11 +184,12 @@ function renderMoverTable(id, rows, hours = reportWindowHours()) {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       const symbol = button.dataset.symbol;
-      if (hasResearch(symbol)) {
+      const latest = latestResearchFor(symbol);
+      if (isResearchFresh(latest)) {
         selectedView = "pipeline";
         activateView("pipeline");
         render();
-        openResearchCard(symbol);
+        openResearchCard(symbol, latest.run_id, latest.research_id);
       } else {
         runResearch(symbol, button);
       }
@@ -216,7 +229,7 @@ function renderPipelineBoard() {
     </div>
   `;
   document.querySelectorAll(".pipeline-card").forEach((card) => {
-    card.addEventListener("click", () => openResearchCard(card.dataset.symbol, card.dataset.runId));
+    card.addEventListener("click", () => openResearchCard(card.dataset.symbol, card.dataset.runId, card.dataset.researchId));
   });
 }
 
@@ -232,7 +245,7 @@ function renderBacktestTable() {
   });
   target.innerHTML = backtestTableHead() + `<tbody>${rows.map(backtestRowHtml).join("") || backtestEmptyRow()}</tbody>`;
   document.querySelectorAll("#backtestTable tbody tr[data-symbol]").forEach((row) => {
-    row.addEventListener("click", () => openResearchCard(row.dataset.symbol, row.dataset.runId));
+    row.addEventListener("click", () => openResearchCard(row.dataset.symbol, row.dataset.runId, row.dataset.researchId));
   });
 }
 
@@ -265,7 +278,7 @@ function backtestTableHead() {
 function backtestRowHtml(card) {
   const symbol = card.symbol || "";
   const setupKind = backtestSetupKind(card);
-  return `<tr data-symbol="${symbol}" data-run-id="${card.run_id || ""}" title="Открыть карточку исследования">
+  return `<tr data-symbol="${symbol}" data-run-id="${card.run_id || ""}" data-research-id="${card.research_id || ""}" title="Открыть карточку исследования">
     <td>${formatDate(card.created_at)}</td>
     <td><a class="symbol-link" href="${bybitUrl(symbol)}" target="_blank" rel="noreferrer" onclick="event.stopPropagation()">${symbol}</a></td>
     <td>${researchSourceLabel(card)}</td>
@@ -348,7 +361,7 @@ function outcomeLabel(card, setupKind) {
 function researchCardHtml(card) {
   const pipeline = card.pipeline || {};
   const stages = pipeline.stages || [];
-  return `<article class="pipeline-card" data-symbol="${card.symbol}" data-run-id="${card.run_id || ""}">
+  return `<article class="pipeline-card" data-symbol="${card.symbol}" data-run-id="${card.run_id || ""}" data-research-id="${card.research_id || ""}">
     <div class="pipeline-header">
       <div>
         <time>${formatDate(card.created_at)}</time>
@@ -359,12 +372,13 @@ function researchCardHtml(card) {
   </article>`;
 }
 
-function openResearchCard(symbol, runId = "") {
-  const card = researchCards.find((item) => item.symbol === symbol && (!runId || item.run_id === runId)) || researchCards.find((item) => item.symbol === symbol);
+function openResearchCard(symbol, runId = "", researchId = "") {
+  const card = researchCardByIdentity(symbol, runId, researchId);
   if (!card) return;
   const setup = card.setup || {};
   const pipeline = card.pipeline || {};
   const stages = stageOrder.map((name) => (pipeline.stages || []).find((stage) => stage.stage === name)).filter(Boolean);
+  const blockingStage = stages.find((stage) => stage?.blocking || stage?.status === "fail" || stage?.status === "error");
   document.getElementById("drawerContent").innerHTML = `
     <h1>${card.symbol}</h1>
     <p>${setupLabel(setup.label)} | ${escapeHtml(setup.reason || "")}</p>
@@ -377,11 +391,11 @@ function openResearchCard(symbol, runId = "") {
       ${Object.entries(card.links || {}).map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`).join("")}
     </div>
     <h2>Фундаментал</h2>
-    ${stageSummary(card.fundamentals)}
+    ${stageSummary(card.fundamentals, blockingStage)}
     <h2>Риск манипуляции</h2>
-    ${stageSummary(card.manipulation)}
+    ${stageSummary(card.manipulation, blockingStage)}
     <h2>Теханализ</h2>
-    ${stageSummary(card.technical_analysis?.stage)}
+    ${stageSummary(card.technical_analysis?.stage, blockingStage)}
     <pre>${escapeHtml(JSON.stringify(card.technical_analysis?.metrics || {}, null, 2))}</pre>
     <h2>Сетап</h2>
     <pre>${escapeHtml(JSON.stringify(localizedSetup(setup), null, 2))}</pre>
@@ -391,40 +405,52 @@ function openResearchCard(symbol, runId = "") {
   document.getElementById("drawer").classList.add("open");
 }
 
-function stageSummary(stage) {
+function stageSummary(stage, blockingStage = null) {
   if (stage?.metrics?.fundamental_label) return fundamentalSummary(stage);
+  const reason = skippedBecauseOfBlockingStage(stage, blockingStage)
+    ? `Этап не запускался, потому что пайплайн остановился раньше: ${stageLabel(blockingStage.stage)} — ${stageReason(blockingStage)}`
+    : stageReason(stage);
   return `<div class="stage-summary">
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
-    <p>${escapeHtml(stage?.reason || "Этап ещё не запускался.")}</p>
+    <p>${escapeHtml(reason || "Этап ещё не запускался.")}</p>
     ${stageMetricList(stage)}
   </div>`;
 }
 
+function skippedBecauseOfBlockingStage(stage, blockingStage) {
+  if (!stage || !blockingStage) return false;
+  if (stage.stage === blockingStage.stage) return false;
+  return stage.status === "skipped" || stage.status === undefined;
+}
+
 function fundamentalSummary(stage) {
   const metrics = stage?.metrics || {};
-  const projectMetricRows = [
-    ["MC", money(metrics.market_cap) || "—"],
+  const identityRows = [
+    ["Название", metrics.name || "—"],
+    ["Сектор", metrics.sector || "—"],
+    ["Экосистема", metrics.chain_ecosystem || "—"],
+    ["Капитализация", metrics.market_cap_tier_label || "Капитализация: нет данных"],
+    ["Market cap", money(metrics.market_cap) || "—"],
     ["FDV", money(metrics.fdv) || "—"],
-    ["FDV/MC", metricNumber(metrics.fdv_to_market_cap)],
+  ];
+  const tokenomicsRows = [
     ["Циркуляция", ratioPct(metrics.circulating_supply_ratio) || "—"],
-    ["Vol/MC", ratioPct(metrics.volume_to_market_cap) || "—"],
+    ["FDV / Market cap", metricNumber(metrics.fdv_to_market_cap)],
+    ["Объем / Market cap", ratioPct(metrics.volume_to_market_cap) || "—"],
     ["Разлок", metrics.unlock_risk_label || "нет данных"]
   ];
-  const trendRows = [
-    ["Сектор", metrics.sector || "—"],
+  const socialRows = [
     ["Соцтема", metrics.social_topic || "нет данных"],
     ["Сила соцтемы", metrics.trend_strength || "нет данных"],
-    ["Фаза внимания", metrics.attention_phase || "нет данных"]
+    ["Фаза внимания", metrics.attention_phase || "нет данных"],
+    ["Посты 24ч", wholeNumber(metrics.social_posts_24h)],
+    ["Авторы 24ч", wholeNumber(metrics.social_authors_24h)],
+    ["Взаимодействия 24ч", wholeNumber(metrics.social_interactions_24h)]
   ];
   const scoreRows = [
     ["Качество проекта", metrics.project_quality_level || scoreBand(metrics.project_quality_score, "quality")],
     ["Нарратив", metrics.narrative_level || scoreBand(metrics.narrative_score, "narrative")],
     ["Риск токеномики", metrics.tokenomics_risk_level || scoreBand(metrics.tokenomics_risk_score, "risk")]
-  ];
-  const socialRows = [
-    ["Посты 24ч", wholeNumber(metrics.social_posts_24h)],
-    ["Авторы 24ч", wholeNumber(metrics.social_authors_24h)],
-    ["Взаимодействия 24ч", wholeNumber(metrics.social_interactions_24h)]
   ];
   const socialItems = cleanList(metrics.social_theses_ru);
   const socialFallback = metrics.lunarcrush_available
@@ -434,26 +460,24 @@ function fundamentalSummary(stage) {
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <div class="fundamental-card">
       <section>
-        <h3>Тип движения</h3>
+        <h3>Кто перед нами</h3>
+        <p>${escapeHtml(metrics.project_brief_ru || metrics.project_summary || "Данных пока нет.")}</p>
+        ${definitionList(identityRows)}
+        ${metrics.market_cap_tier_reason ? `<p>${escapeHtml(metrics.market_cap_tier_reason)}</p>` : ""}
+      </section>
+      <section>
+        <h3>Токеномика</h3>
+        ${definitionList(tokenomicsRows)}
+      </section>
+      <section>
+        <h3>Почему могло двигаться</h3>
         <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
         ${bulletList(metrics.movement_type_reasons)}
       </section>
       <section>
-        <h3>Что это за проект</h3>
-        <p>${escapeHtml(metrics.project_brief_ru || metrics.project_summary || "Данных пока нет.")}</p>
-      </section>
-      <section>
-        <h3>Сектор / соцтема</h3>
-        ${definitionList(trendRows)}
-      </section>
-      <section>
-        <h3>Что говорят в соцсетях</h3>
-        ${definitionList(socialRows)}
+        <h3>Соцконтекст</h3>
+        ${metrics.lunarcrush_available ? definitionList(socialRows) : ""}
         ${bulletList(socialItems.length ? socialItems : socialFallback)}
-      </section>
-      <section>
-        <h3>Метрики проекта</h3>
-        ${definitionList(projectMetricRows)}
       </section>
       <section>
         <h3>Оценка</h3>
@@ -473,14 +497,73 @@ function cleanList(items) {
 }
 
 function stageBlock(stage) {
+  const reason = stageReason(stage);
   return `<div class="stage">
     <div>${stageLabel(stage.stage)}</div>
     <div><span class="badge ${stage.status}">${statusLabel(stage.status)}</span></div>
     <div>
-      <div>${escapeHtml(stage.reason || "")}</div>
+      <div>${escapeHtml(reason)}</div>
       <pre>${escapeHtml(JSON.stringify({ score: stage.score, blocking: stage.blocking, metrics: displayMetrics(stage.metrics) }, null, 2))}</pre>
     </div>
   </div>`;
+}
+
+function stageReason(stage) {
+  if (!stage) return "";
+  if (stage.stage === "market_scan" && stage.status === "fail") {
+    return marketFilterReason(stage.metrics || {}, stage.reason || "");
+  }
+  return translateReason(stage.reason || "");
+}
+
+function marketFilterReason(metrics, fallback) {
+  const filterReasons = Array.isArray(metrics.filter_reasons) ? metrics.filter_reasons : [];
+  const translated = filterReasons.map(translateFilterReason).filter(Boolean);
+  if (translated.length) return `Монета не прошла базовый фильтр. ${translated.join(" ")}`;
+
+  const turnover = Number(metrics.turnover_24h);
+  const minimum = Number(metrics.min_turnover_24h);
+  if (Number.isFinite(turnover) && Number.isFinite(minimum) && turnover < minimum) {
+    return `Монета не прошла базовый фильтр. Объем 24ч ${money(turnover)} ниже минимума ${money(minimum)}.`;
+  }
+
+  const translatedFallback = translateReason(fallback);
+  if (translatedFallback) return translatedFallback;
+  return "Монета не прошла базовые фильтры перед глубоким исследованием.";
+}
+
+function translateFilterReason(reason) {
+  const text = String(reason || "");
+  const turnoverMatch = text.match(/24h turnover \$([\d,]+) is below minimum \$([\d,]+)\./);
+  if (turnoverMatch) {
+    return `Объем 24ч $${turnoverMatch[1]} ниже минимума $${turnoverMatch[2]}.`;
+  }
+  const spreadMatch = text.match(/Ticker spread ([\d.]+) bps is above 60\.0 bps\./);
+  if (spreadMatch) return `Спред ${spreadMatch[1]} bps выше лимита 60 bps.`;
+  if (text === "Base coin is excluded by universe filter.") return "Базовая монета исключена фильтром universe.";
+  if (text === "Quote coin is not USDT.") return "Пара не в USDT.";
+  if (text === "Ticker is missing.") return "Нет ticker-данных Bybit.";
+  if (text === "Instrument not found.") return "Инструмент не найден в Bybit.";
+  if (text === "Last price is missing or zero.") return "Последняя цена отсутствует или равна нулю.";
+  if (text.startsWith("Instrument status is ")) return `Статус инструмента: ${text.replace("Instrument status is ", "").replace(".", "")}.`;
+  if (text.startsWith("Contract type is ")) return `Тип контракта: ${text.replace("Contract type is ", "").replace(".", "")}.`;
+  return text;
+}
+
+function translateReason(reason) {
+  const text = String(reason || "");
+  if (!text) return "";
+  if (text === "Symbol failed universe/liquidity filters before expensive analysis.") {
+    return "Монета не прошла базовые фильтры перед глубоким исследованием.";
+  }
+  if (text === "Symbol is tradable and eligible for high-volatility prefiltering.") {
+    return "Монета торгуется и подходит для первичного high-volatility отбора.";
+  }
+  if (text === "Stage has not run yet.") return "Этап еще не запускался.";
+  if (text === "No actionable setup was produced by the trade plan stage.") {
+    return "Торговый план не сформировал рабочий сетап.";
+  }
+  return text;
 }
 
 function displayMetrics(metrics) {
@@ -590,7 +673,7 @@ function updatePageChrome() {
     pipeline: "Пайплайн",
     backtests: "Бэктесты"
   };
-  document.getElementById("pageTitle").textContent = titles[selectedView] || "Щит&Меч";
+  document.getElementById("pageTitle").textContent = titles[selectedView] || "Щит и Меч";
   document.querySelector(".topbar").hidden = selectedView === "pipeline";
   document.querySelector(".scan-actions").hidden = selectedView !== "live";
   document.getElementById("stats").hidden = selectedView !== "live";
@@ -598,8 +681,60 @@ function updatePageChrome() {
   document.querySelector(".workspace").classList.toggle("backtests-mode", selectedView === "backtests");
 }
 
-function hasResearch(symbol) {
-  return researchCards.some((card) => card.symbol === symbol);
+function researchActionFor(symbol) {
+  const latest = latestResearchFor(symbol);
+  if (!latest) {
+    return { label: "Исследовать", title: "Запустить исследование" };
+  }
+  if (isResearchFresh(latest)) {
+    return { label: "Открыть", title: "Открыть исследование" };
+  }
+  return {
+    label: "Обновить",
+    title: "Обновить исследование: последняя карточка старше 24ч"
+  };
+}
+
+function applyResearchActionState(button, symbol) {
+  const action = researchActionFor(symbol);
+  button.textContent = action.label;
+  button.title = action.title;
+}
+
+function latestResearchFor(symbol) {
+  const normalized = String(symbol || "").toUpperCase();
+  return sortResearchCards(researchCards.filter((card) => String(card.symbol || "").toUpperCase() === normalized))[0] || null;
+}
+
+function isResearchFresh(card) {
+  if (!card?.created_at) return false;
+  if (card.is_stale_after_24h === true) return false;
+  const createdAt = Date.parse(card.created_at);
+  if (!Number.isFinite(createdAt)) return false;
+  return Date.now() - createdAt < 24 * 60 * 60 * 1000;
+}
+
+function sortResearchCards(cards) {
+  return [...cards].sort((left, right) => {
+    const leftTime = Date.parse(left.created_at || "") || 0;
+    const rightTime = Date.parse(right.created_at || "") || 0;
+    if (leftTime !== rightTime) return rightTime - leftTime;
+    return Number(right.research_id || 0) - Number(left.research_id || 0);
+  });
+}
+
+function researchCardByIdentity(symbol, runId = "", researchId = "") {
+  const normalized = String(symbol || "").toUpperCase();
+  const id = String(researchId || "");
+  if (id) {
+    const byId = researchCards.find((item) => String(item.research_id || "") === id);
+    if (byId) return byId;
+  }
+  if (runId) {
+    const byRun = researchCards.find((item) => String(item.symbol || "").toUpperCase() === normalized && item.run_id === runId);
+    if (byRun) return byRun;
+  }
+  return latestResearchFor(normalized);
 }
 
 function bybitUrl(symbol) {
@@ -614,7 +749,7 @@ function statusLabel(status) {
   return ({
     pass: "пройдено",
     warn: "внимание",
-    fail: "ошибка",
+    fail: "не прошла",
     error: "ошибка",
     skipped: "пропущено"
   })[status] || status || "пропущено";

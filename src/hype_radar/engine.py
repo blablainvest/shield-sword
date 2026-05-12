@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from .bybit import BybitPublicClient
-from .filters import tradable_symbol
+from .filters import is_excluded_base, tradable_symbol
 from .models import Candidate, Instrument, LongShortRatio, PipelineCandidate, PipelineStageResult, ScanRun, Ticker
 from .scoring import MarketSnapshot, score_snapshot
 from .token_intelligence import (
@@ -43,32 +43,19 @@ class ScanReport:
     errors: Dict[str, str]
 
     def to_dict(self) -> Dict[str, object]:
+        top_limit = _top_limit(self.run.config)
+        top_gainers_pipeline = _pipeline_side_candidates(self.all_candidates, "gainer", top_limit)
+        top_losers_pipeline = _pipeline_side_candidates(self.all_candidates, "loser", top_limit)
         return {
             "run": self.run.to_dict(),
             "top_long": [candidate.to_dict() for candidate in self.top_long],
             "top_short_watch": [candidate.to_dict() for candidate in self.top_short_watch],
             "top_gainers_24h": [candidate.to_dict() for candidate in self.top_long],
             "top_losers_24h": [candidate.to_dict() for candidate in self.top_short_watch],
-            "top_gainers_pipeline": [
-                candidate.to_dict()
-                for candidate in self.all_candidates
-                if _selection_side(candidate) == "gainer"
-            ],
-            "top_losers_pipeline": [
-                candidate.to_dict()
-                for candidate in self.all_candidates
-                if _selection_side(candidate) == "loser"
-            ],
-            "top_gainers_24h_pipeline": [
-                candidate.to_dict()
-                for candidate in self.all_candidates
-                if _selection_side(candidate) == "gainer"
-            ],
-            "top_losers_24h_pipeline": [
-                candidate.to_dict()
-                for candidate in self.all_candidates
-                if _selection_side(candidate) == "loser"
-            ],
+            "top_gainers_pipeline": top_gainers_pipeline,
+            "top_losers_pipeline": top_losers_pipeline,
+            "top_gainers_24h_pipeline": top_gainers_pipeline,
+            "top_losers_24h_pipeline": top_losers_pipeline,
             "all_candidates": [candidate.to_dict() for candidate in self.all_candidates],
             "rejected_candidates": [candidate.to_dict() for candidate in self.rejected_candidates],
             "pipeline_runs": [self.run.to_dict()],
@@ -655,6 +642,21 @@ def _selection_side(candidate: PipelineCandidate) -> Optional[str]:
     return None
 
 
+def _top_limit(config: Dict[str, object]) -> int:
+    try:
+        return max(1, int(config.get("top", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _pipeline_side_candidates(candidates: Sequence[PipelineCandidate], side: str, limit: int) -> List[Dict[str, object]]:
+    return [
+        candidate.to_dict()
+        for candidate in candidates
+        if _selection_side(candidate) == side
+    ][:limit]
+
+
 def _selection_bucket_name(side: str, window_hours: int) -> str:
     suffix = "gainer" if side == "gainer" else "loser"
     return f"top_{window_hours}h_{suffix}"
@@ -718,15 +720,45 @@ def _market_stage(instrument: Instrument, ticker: Optional[Ticker], config: Scan
             raw_source={"instrument": asdict(instrument), "ticker": asdict(ticker)},
             blocking=False,
         )
+    failure_reasons = _market_filter_reasons(instrument, ticker, config)
     return PipelineStageResult(
         stage="market_scan",
         status="fail",
         score=round(_prefilter_score(ticker), 4),
-        reason="Symbol failed universe/liquidity filters before expensive analysis.",
-        metrics=metrics,
+        reason="; ".join(failure_reasons) if failure_reasons else "Symbol failed universe/liquidity filters before expensive analysis.",
+        metrics={**metrics, "filter_reasons": failure_reasons},
         raw_source={"instrument": asdict(instrument), "ticker": asdict(ticker)},
         blocking=True,
     )
+
+
+def _market_filter_reasons(instrument: Optional[Instrument], ticker: Optional[Ticker], config: ScanConfig) -> List[str]:
+    reasons: List[str] = []
+    if not instrument:
+        return ["Instrument not found."]
+    if instrument.quote_coin.upper() != "USDT":
+        reasons.append("Quote coin is not USDT.")
+    if instrument.status != "Trading":
+        reasons.append(f"Instrument status is {instrument.status}.")
+    if instrument.contract_type and instrument.contract_type != "LinearPerpetual":
+        reasons.append(f"Contract type is {instrument.contract_type}.")
+    if is_excluded_base(instrument.base_coin):
+        reasons.append("Base coin is excluded by universe filter.")
+    if not ticker:
+        reasons.append("Ticker is missing.")
+        return reasons
+    if ticker.last_price <= 0:
+        reasons.append("Last price is missing or zero.")
+    if ticker.turnover_24h < config.min_turnover_24h:
+        reasons.append(
+            f"24h turnover ${ticker.turnover_24h:,.0f} is below minimum ${config.min_turnover_24h:,.0f}."
+        )
+    if ticker.bid_price > 0 and ticker.ask_price > 0:
+        mid = (ticker.bid_price + ticker.ask_price) / 2.0
+        spread_bps = ((ticker.ask_price - ticker.bid_price) / mid) * 10000.0 if mid > 0 else 999.0
+        if spread_bps > 60.0:
+            reasons.append(f"Ticker spread {spread_bps:.1f} bps is above 60.0 bps.")
+    return reasons
 
 
 def _add_context_stages(

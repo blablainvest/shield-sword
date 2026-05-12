@@ -31,7 +31,7 @@ class RadarServer:
             server_owner = owner
 
         httpd = ThreadingHTTPServer((self.host, self.port), Handler)
-        print("Щит&Меч dashboard: http://%s:%s" % (self.host, self.port))
+        print("Щит и Меч dashboard: http://%s:%s" % (self.host, self.port))
         httpd.serve_forever()
 
 
@@ -71,7 +71,7 @@ class RadarRequestHandler(BaseHTTPRequestHandler):
             self._json({"runs": store.list_runs(limit=_int_query(query, "limit", 50))})
             return
         if path == "/api/research":
-            self._json({"research": store.list_research(run_id=_optional_first(query, "run_id"), limit=_int_query(query, "limit", 100))})
+            self._json({"research": store.list_research(run_id=_optional_first(query, "run_id"), limit=_optional_int_query(query, "limit"))})
             return
         if path.startswith("/api/research/"):
             parts = path.split("/")
@@ -139,9 +139,8 @@ class RadarRequestHandler(BaseHTTPRequestHandler):
         )
         candidate = self.server_owner.engine.research_symbol(symbol, config)
         run_id = self.server_owner.store.latest_run_id() or "manual"
-        self.server_owner.store.save_research(run_id, candidate)
-        card = self.server_owner.store.get_research(run_id, candidate.symbol)
-        self._json(card or candidate.to_dict())
+        card = self.server_owner.store.save_research(run_id, candidate)
+        self._json(card)
 
     def _serve_static(self, path: str) -> None:
         static_root = Path(__file__).parent / "web"
@@ -189,6 +188,16 @@ def _int_query(query: Dict[str, Any], key: str, default: int) -> int:
         return int(_first(query, key, str(default)))
     except ValueError:
         return default
+
+
+def _optional_int_query(query: Dict[str, Any], key: str) -> Optional[int]:
+    value = _optional_first(query, key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _volume_query(query: Dict[str, Any]) -> float:

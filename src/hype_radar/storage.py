@@ -105,14 +105,14 @@ class RadarStore:
             ).fetchone()
         return json.loads(row["report_json"]) if row else None
 
-    def save_research(self, run_id: str, candidate: PipelineCandidate) -> None:
+    def save_research(self, run_id: str, candidate: PipelineCandidate) -> Dict[str, Any]:
         card = _research_card(candidate.to_dict())
         card["run_id"] = run_id
         card["created_at"] = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
-                INSERT OR REPLACE INTO research_cards
+                INSERT INTO research_cards
                 (run_id, symbol, created_at, final_verdict, failed_stage, research_json)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
@@ -125,6 +125,13 @@ class RadarStore:
                     json.dumps(card, ensure_ascii=False),
                 ),
             )
+            research_id = int(cursor.lastrowid)
+            card["research_id"] = research_id
+            conn.execute(
+                "UPDATE research_cards SET research_json = ? WHERE id = ?",
+                (json.dumps(card, ensure_ascii=False), research_id),
+            )
+        return card
 
     def list_runs(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._connect() as conn:
@@ -194,22 +201,23 @@ class RadarStore:
             ).fetchone()
         return str(row["run_id"]) if row else None
 
-    def list_research(self, run_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_research(self, run_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         if run_id:
             query = """
-                SELECT created_at, research_json FROM research_cards
+                SELECT id, created_at, research_json FROM research_cards
                 WHERE run_id = ?
                 ORDER BY created_at DESC, id DESC
-                LIMIT ?
             """
-            params = (run_id, limit)
+            params: tuple[Any, ...] = (run_id,)
         else:
             query = """
-                SELECT created_at, research_json FROM research_cards
+                SELECT id, created_at, research_json FROM research_cards
                 ORDER BY created_at DESC, id DESC
-                LIMIT ?
             """
-            params = (limit,)
+            params = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (*params, limit)
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [_card_with_created_at(row) for row in rows]
@@ -217,7 +225,12 @@ class RadarStore:
     def get_research(self, run_id: str, symbol: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT created_at, research_json FROM research_cards WHERE run_id = ? AND symbol = ?",
+                """
+                SELECT id, created_at, research_json FROM research_cards
+                WHERE run_id = ? AND symbol = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
                 (run_id, symbol.upper()),
             ).fetchone()
         return _card_with_created_at(row) if row else None
@@ -291,13 +304,48 @@ class RadarStore:
                     created_at TEXT NOT NULL,
                     final_verdict TEXT,
                     failed_stage TEXT,
-                    research_json TEXT NOT NULL,
-                    UNIQUE(run_id, symbol)
+                    research_json TEXT NOT NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_research_run ON research_cards(run_id);
+                CREATE INDEX IF NOT EXISTS idx_research_symbol_created ON research_cards(symbol, created_at DESC);
                 """
             )
+            self._migrate_research_cards_append_only(conn)
+
+    def _migrate_research_cards_append_only(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'research_cards'"
+        ).fetchone()
+        table_sql = row["sql"] if row else ""
+        if "UNIQUE(run_id, symbol)" not in table_sql:
+            return
+        conn.executescript(
+            """
+            ALTER TABLE research_cards RENAME TO research_cards_old;
+
+            CREATE TABLE research_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                final_verdict TEXT,
+                failed_stage TEXT,
+                research_json TEXT NOT NULL
+            );
+
+            INSERT INTO research_cards
+            (id, run_id, symbol, created_at, final_verdict, failed_stage, research_json)
+            SELECT id, run_id, symbol, created_at, final_verdict, failed_stage, research_json
+            FROM research_cards_old
+            ORDER BY id;
+
+            DROP TABLE research_cards_old;
+
+            CREATE INDEX IF NOT EXISTS idx_research_run ON research_cards(run_id);
+            CREATE INDEX IF NOT EXISTS idx_research_symbol_created ON research_cards(symbol, created_at DESC);
+            """
+        )
 
 
 def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -342,8 +390,24 @@ def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _card_with_created_at(row: sqlite3.Row) -> Dict[str, Any]:
     card = json.loads(row["research_json"])
-    card.setdefault("created_at", row["created_at"])
+    card["research_id"] = int(row["id"])
+    card["created_at"] = row["created_at"]
+    created_at = _parse_datetime(row["created_at"])
+    if created_at:
+        age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
+        card["research_age_hours"] = round(max(0.0, age_hours), 2)
+        card["is_stale_after_24h"] = age_hours >= 24
     return card
+
+
+def _parse_datetime(value: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _stage_summary(stages: List[Dict[str, Any]], name: str) -> Dict[str, Any]:
