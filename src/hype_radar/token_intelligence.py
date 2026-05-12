@@ -76,10 +76,9 @@ class OpenAiTextNormalizer:
                     "Переводи и сжимай факты, не добавляй новых фактов и не давай торговых рекомендаций. "
                     "CoinGecko-категории и platforms являются источником истины для сектора/экосистемы; "
                     "LunarCrush topics описывают только соцтему и не должны подменять экосистему проекта. "
-                    "Верни только валидный JSON с ключами: project_brief_ru, top_posts_ru, social_theses_ru, "
+                    "Верни только валидный JSON с ключами: project_brief_ru, top_posts_ru, "
                     "movement_supportive_ru, movement_suspicious_ru. project_brief_ru должен быть до 500 символов. "
-                    "social_theses_ru должен содержать 2-4 коротких тезиса о содержательных соцобсуждениях, "
-                    "а не списки биржевых топ-гейнеров. Пункты списков должны быть короткими и читабельными на русском."
+                    "Пункты списков должны быть короткими и читабельными на русском."
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -479,7 +478,6 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     movement_supportive_ru = normalized_list(normalized.get("movement_supportive_ru"), supporting_factors, max_items=6)
     movement_suspicious_ru = normalized_list(normalized.get("movement_suspicious_ru"), suspicious_factors, max_items=6)
     top_posts_ru = normalized_list(normalized.get("top_posts_ru"), lunar_metrics.get("top_posts") or [], max_items=5)
-    social_theses_ru = social_theses(normalized.get("social_theses_ru"), top_posts_ru, lunar_metrics)
     movement_type_reasons = movement_type_reasons_for(circ_ratio, volume_to_market_cap, trend, lunar_metrics, tokenomics_risk)
     thesis = build_fundamental_thesis(project_brief, trend, movement_supportive_ru, movement_suspicious_ru)
     return {
@@ -529,7 +527,6 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "social_interactions_24h": lunar_metrics.get("social_interactions_24h"),
         "top_posts": lunar_metrics.get("top_posts"),
         "top_posts_ru": top_posts_ru,
-        "social_theses_ru": social_theses_ru,
         "movement_supportive": supporting_factors[:8],
         "movement_supportive_ru": movement_supportive_ru,
         "movement_suspicious": suspicious_factors[:8],

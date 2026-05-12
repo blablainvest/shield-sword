@@ -797,7 +797,7 @@ def _add_risk_stages(
     candidate: Candidate,
     token_data: Optional[Dict[str, object]] = None,
 ) -> None:
-    manipulation_status = "fail" if candidate.manipulation_score > 82 else "warn" if candidate.manipulation_score > 55 else "pass"
+    manipulation_status = _manipulation_status(candidate.manipulation_score)
     fundamental_stage = next((stage for stage in pipeline.stages if stage.stage == "fundamentals"), None)
     supply_ratio = (fundamental_stage.metrics or {}).get("circulating_supply_ratio") if fundamental_stage else None
     social_stage = next((stage for stage in pipeline.stages if stage.stage == "social_filter"), None)
@@ -821,6 +821,10 @@ def _add_risk_stages(
             metrics={
                 "manipulation_score": candidate.manipulation_score,
                 "late_entry_risk": candidate.late_entry_risk,
+                "manipulation_risk_label": _risk_level(candidate.manipulation_score),
+                "late_entry_risk_label": _late_entry_level(candidate.late_entry_risk),
+                "manipulation_breakdown": candidate.manipulation_breakdown,
+                "late_entry_breakdown": candidate.late_entry_breakdown,
                 "spread_liquidity_score": candidate.scores.liquidity,
                 "candle_volume_concentration": candidate.features.candle_volume_concentration,
                 "circulating_supply_ratio": supply_ratio,
@@ -907,6 +911,30 @@ def _manipulation_reason(score: float) -> str:
     if score > 55:
         return "Повышенный риск манипуляции; нужна более сильная валидация."
     return "Критичных признаков манипуляции не найдено."
+
+
+def _manipulation_status(score: float) -> str:
+    if score > 82:
+        return "fail"
+    if score > 55:
+        return "warn"
+    return "pass"
+
+
+def _risk_level(score: float) -> str:
+    if score > 82:
+        return "высокий"
+    if score > 55:
+        return "средний"
+    return "низкий"
+
+
+def _late_entry_level(score: float) -> str:
+    if score > 75:
+        return "движение перегрето"
+    if score > 45:
+        return "есть риск догонять движение"
+    return "вход не выглядит поздним"
 
 
 def _manipulation_contributors(

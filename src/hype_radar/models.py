@@ -120,6 +120,8 @@ class Candidate:
     hype_cause: List[str]
     reason_summary: str
     trade_plan: TradePlan
+    manipulation_breakdown: List[Dict[str, Any]] = field(default_factory=list)
+    late_entry_breakdown: List[Dict[str, Any]] = field(default_factory=list)
     scores: ScoreBreakdown = field(default_factory=ScoreBreakdown)
     features: FeatureSet = field(default_factory=FeatureSet)
     price_24h_pct: float = 0.0

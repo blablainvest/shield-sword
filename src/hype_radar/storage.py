@@ -432,19 +432,88 @@ def _links(symbol: str) -> Dict[str, str]:
 
 def _summary(final: Dict[str, Any]) -> List[str]:
     if not final:
-        return ["Research did not reach scoring. Check the failed stage and raw market data."]
+        return ["Исследование не дошло до скоринга. Проверь failed stage и raw market data."]
+    manipulation = final.get("manipulation_score")
+    late_entry = final.get("late_entry_risk")
+    lifecycle = final.get("theme_lifecycle_stage")
     return [
-        "Selected from 24h movers and researched manually.",
-        "Manipulation score: %s; late-entry risk: %s." % (final.get("manipulation_score"), final.get("late_entry_risk")),
-        "Lifecycle stage: %s." % final.get("theme_lifecycle_stage"),
+        "Риск ликвидности / манипулятивности: %s / 100 — %s. Чем выше число, тем хуже качество движения и ликвидности."
+        % (_fmt_score(manipulation), manipulation_level(manipulation)),
+        "Риск позднего входа: %s / 100 — %s."
+        % (_fmt_score(late_entry), late_entry_level(late_entry)),
+        "Фаза движения: %s — %s."
+        % (lifecycle_label(lifecycle), lifecycle_reason(lifecycle)),
     ]
 
 
 def _why_it_moved(final: Dict[str, Any]) -> List[str]:
     causes = final.get("hype_cause") or []
     if not causes:
-        return ["No external catalyst module is configured yet; current explanation is market-data based."]
-    return ["Detected market causes: %s." % ", ".join(causes)]
+        return ["Внешний catalyst module пока не настроен; объяснение основано на market-data."]
+    labels = [hype_cause_label(cause) for cause in causes]
+    return ["Рыночные причины: %s." % ", ".join(labels)]
+
+
+def _fmt_score(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "нет данных"
+    return ("%.2f" % number).rstrip("0").rstrip(".")
+
+
+def manipulation_level(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "нет данных"
+    if score > 82:
+        return "высокий"
+    if score > 55:
+        return "средний"
+    return "низкий"
+
+
+def late_entry_level(value: Any) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "нет данных"
+    if score > 75:
+        return "движение перегрето"
+    if score > 45:
+        return "есть риск догонять движение"
+    return "вход не выглядит поздним"
+
+
+def lifecycle_label(value: Any) -> str:
+    return {
+        "early_discovery": "раннее обнаружение",
+        "acceleration": "ускорение",
+        "mainstream_hype": "массовый разгон",
+        "exhaustion": "истощение движения",
+        "distribution": "распределение / ломается структура",
+    }.get(str(value or ""), "нет данных")
+
+
+def lifecycle_reason(value: Any) -> str:
+    return {
+        "early_discovery": "движение еще не выглядит перегретым.",
+        "acceleration": "цена или объем ускоряются относительно базы.",
+        "mainstream_hype": "движение уже заметно рынку, риск позднего входа выше.",
+        "exhaustion": "есть признаки выдыхания импульса; лонг с текущих опаснее.",
+        "distribution": "структура ломается или риск позднего входа экстремальный.",
+    }.get(str(value or ""), "фаза не определена.")
+
+
+def hype_cause_label(value: Any) -> str:
+    return {
+        "volume_spike": "всплеск объема",
+        "market_anomaly": "аномальное движение цены",
+        "mainstream_hype": "сильное 24ч движение",
+        "manipulative": "повышенный риск манипулятивности",
+        "market_watch": "рыночное наблюдение без сильного триггера",
+    }.get(str(value or ""), str(value or "нет данных"))
 
 
 def _setup_label(final: Dict[str, Any]) -> str:

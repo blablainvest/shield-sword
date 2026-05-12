@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from .indicators import (
     atr,
@@ -88,8 +88,10 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
     ta_long = ta_long_score(features)
     ta_short = ta_short_score(features)
     relative_strength = clamp(50.0 + ((features.return_1h - snapshot.alt_market_return_1h) * 500.0), 0.0, 100.0)
-    manipulation = manipulation_score(features, orderbook, ticker)
-    late_risk = late_entry_risk(features, ticker)
+    manipulation_parts = manipulation_breakdown(features, orderbook, ticker)
+    late_entry_parts = late_entry_breakdown(features, ticker)
+    manipulation = clamp(sum(item["points"] for item in manipulation_parts))
+    late_risk = clamp(sum(item["points"] for item in late_entry_parts))
 
     scores = ScoreBreakdown(
         market_anomaly=market_anomaly,
@@ -150,6 +152,8 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
         hype_cause=hype_cause,
         reason_summary=reason,
         trade_plan=trade_plan,
+        manipulation_breakdown=manipulation_parts,
+        late_entry_breakdown=late_entry_parts,
         scores=scores,
         features=features,
         price_24h_pct=ticker.price_24h_pct,
@@ -194,25 +198,54 @@ def ta_short_score(features: FeatureSet) -> float:
 
 
 def manipulation_score(features: FeatureSet, orderbook: OrderbookStats, ticker: Ticker) -> float:
-    score = 0.0
-    score += clamp((orderbook.spread_bps - 8.0) * 2.5, 0.0, 25.0)
-    score += clamp((50000.0 - orderbook.depth_total_usdt_50bps) / 2500.0, 0.0, 25.0)
-    score += 20.0 if features.candle_volume_concentration > 0.62 else 8.0 if features.candle_volume_concentration > 0.48 else 0.0
-    score += 15.0 if abs(ticker.funding_rate) > 0.001 else 8.0 if abs(ticker.funding_rate) > 0.0005 else 0.0
-    score += 12.0 if features.return_1h > 0.12 and features.volume_growth_1h < 1.5 else 0.0
-    score += 10.0 if ticker.open_interest_value <= 0 else 0.0
-    return clamp(score)
+    return clamp(sum(item["points"] for item in manipulation_breakdown(features, orderbook, ticker)))
+
+
+def manipulation_breakdown(features: FeatureSet, orderbook: OrderbookStats, ticker: Ticker) -> List[Dict[str, Any]]:
+    spread_points = clamp((orderbook.spread_bps - 8.0) * 2.5, 0.0, 25.0)
+    depth_points = clamp((50000.0 - orderbook.depth_total_usdt_50bps) / 2500.0, 0.0, 25.0)
+    concentration_points = 20.0 if features.candle_volume_concentration > 0.62 else 8.0 if features.candle_volume_concentration > 0.48 else 0.0
+    funding_abs = abs(ticker.funding_rate)
+    funding_points = 15.0 if funding_abs > 0.001 else 8.0 if funding_abs > 0.0005 else 0.0
+    no_volume_pump_points = 12.0 if features.return_1h > 0.12 and features.volume_growth_1h < 1.5 else 0.0
+    missing_oi_points = 10.0 if ticker.open_interest_value <= 0 else 0.0
+    return [
+        risk_factor("spread", "Спред стакана", spread_points, 25.0, orderbook.spread_bps, "bps", "Широкий спред ухудшает вход/выход и повышает риск проскальзывания."),
+        risk_factor("depth_50bps", "Глубина стакана 50 bps", depth_points, 25.0, orderbook.depth_total_usdt_50bps, "USDT", "Малая глубина означает, что цену легче сдвинуть небольшим объемом."),
+        risk_factor("volume_concentration", "Концентрация объема", concentration_points, 20.0, features.candle_volume_concentration, "ratio", "Если объем сидит в одной из последних 4 часовых свечей, движение менее устойчиво."),
+        risk_factor("funding", "Funding", funding_points, 15.0, funding_abs, "ratio", "Перегретый funding показывает перекос в деривативах."),
+        risk_factor("pump_without_volume", "Рост 1ч без роста объема", no_volume_pump_points, 12.0, features.return_1h, "ratio", "Цена выросла сильно, но объем не подтвердил движение."),
+        risk_factor("missing_open_interest", "Нет open interest", missing_oi_points, 10.0, ticker.open_interest_value, "USDT", "Без OI хуже видно деривативный контекст."),
+    ]
 
 
 def late_entry_risk(features: FeatureSet, ticker: Ticker) -> float:
-    score = 0.0
-    score += clamp(features.return_24h * 100.0, 0.0, 30.0)
-    score += clamp(features.return_4h * 160.0, 0.0, 24.0)
-    score += clamp((features.rsi_1h - 68.0) * 1.8, 0.0, 22.0)
-    score += clamp((features.atr_distance_1h - 1.8) * 8.0, 0.0, 24.0)
-    score += 12.0 if abs(ticker.funding_rate) > 0.00075 else 0.0
-    score += 10.0 if features.volume_declining_on_highs else 0.0
-    return clamp(score)
+    return clamp(sum(item["points"] for item in late_entry_breakdown(features, ticker)))
+
+
+def late_entry_breakdown(features: FeatureSet, ticker: Ticker) -> List[Dict[str, Any]]:
+    funding_abs = abs(ticker.funding_rate)
+    return [
+        risk_factor("return_24h", "Рост за 24ч", clamp(features.return_24h * 100.0, 0.0, 30.0), 30.0, features.return_24h, "ratio", "Чем сильнее монета уже выросла за сутки, тем выше риск догонять движение."),
+        risk_factor("return_4h", "Рост за 4ч", clamp(features.return_4h * 160.0, 0.0, 24.0), 24.0, features.return_4h, "ratio", "Быстрый 4ч разгон повышает риск входа после основной импульсной части."),
+        risk_factor("rsi_1h", "RSI 1ч выше 68", clamp((features.rsi_1h - 68.0) * 1.8, 0.0, 22.0), 22.0, features.rsi_1h, "number", "Высокий RSI показывает перегретость краткосрочного движения."),
+        risk_factor("atr_distance", "Удаление от VWAP через ATR", clamp((features.atr_distance_1h - 1.8) * 8.0, 0.0, 24.0), 24.0, features.atr_distance_1h, "number", "Чем дальше цена от VWAP в ATR, тем хуже качество входа по текущей цене."),
+        risk_factor("funding", "Funding", 12.0 if funding_abs > 0.00075 else 0.0, 12.0, funding_abs, "ratio", "Перегретый funding повышает риск входа после crowded move."),
+        risk_factor("volume_declining_on_highs", "Объем снижается на хаях", 10.0 if features.volume_declining_on_highs else 0.0, 10.0, features.volume_declining_on_highs, "bool", "Цена обновляет highs, но объем слабеет: возможное выдыхание импульса."),
+    ]
+
+
+def risk_factor(key: str, label: str, points: float, max_points: float, value: Any, value_type: str, description: str) -> Dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "points": round(points, 2),
+        "max_points": max_points,
+        "value": value,
+        "value_type": value_type,
+        "active": points > 0,
+        "description": description,
+    }
 
 
 def exhaustion_confirmed(features: FeatureSet) -> bool:

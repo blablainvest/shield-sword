@@ -392,7 +392,7 @@ function openResearchCard(symbol, runId = "", researchId = "") {
     </div>
     <h2>Фундаментал</h2>
     ${stageSummary(card.fundamentals, blockingStage)}
-    <h2>Риск манипуляции</h2>
+    <h2>Риск ликвидности / манипулятивности</h2>
     ${stageSummary(card.manipulation, blockingStage)}
     <h2>Теханализ</h2>
     ${stageSummary(card.technical_analysis?.stage, blockingStage)}
@@ -406,6 +406,7 @@ function openResearchCard(symbol, runId = "", researchId = "") {
 }
 
 function stageSummary(stage, blockingStage = null) {
+  if (stage?.stage === "manipulation_detector") return manipulationSummary(stage);
   if (stage?.metrics?.fundamental_label) return fundamentalSummary(stage);
   const reason = skippedBecauseOfBlockingStage(stage, blockingStage)
     ? `Этап не запускался, потому что пайплайн остановился раньше: ${stageLabel(blockingStage.stage)} — ${stageReason(blockingStage)}`
@@ -415,6 +416,69 @@ function stageSummary(stage, blockingStage = null) {
     <p>${escapeHtml(reason || "Этап ещё не запускался.")}</p>
     ${stageMetricList(stage)}
   </div>`;
+}
+
+function manipulationSummary(stage) {
+  const metrics = stage?.metrics || {};
+  const score = Number(metrics.manipulation_score);
+  const late = Number(metrics.late_entry_risk);
+  const riskText = Number.isFinite(score) ? `${score.toFixed(2)} / 100 — ${riskLevel(score)}` : "нет данных";
+  const lateText = Number.isFinite(late) ? `${late.toFixed(2)} / 100 — ${lateEntryLevel(late)}` : "нет данных";
+  const riskSummaryRows = [
+    ["Риск ликвидности / манипулятивности", riskText],
+    ["Риск позднего входа", lateText],
+    ["Шкала", "<=55 пройдено; 56-82 предупреждение; >82 не пройдено"]
+  ];
+  const activeManipulation = activeRiskFactors(metrics.manipulation_breakdown);
+  const activeLateEntry = activeRiskFactors(metrics.late_entry_breakdown);
+  const contextFlags = cleanList(metrics.risk_contributors).filter((item) => item !== "критичных факторов в доступных данных нет");
+  return `<div class="stage-summary manipulation-summary">
+    <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
+    <p>${escapeHtml(stageReason(stage) || "Этап еще не запускался.")}</p>
+    ${definitionList(riskSummaryRows)}
+    <section>
+      <h3>Что добавило риск манипулятивности</h3>
+      ${riskFactorList(activeManipulation, "Существенных факторов в формуле не сработало.")}
+    </section>
+    <section>
+      <h3>Что добавило риск позднего входа</h3>
+      ${riskFactorList(activeLateEntry, "Существенных факторов позднего входа не сработало.")}
+    </section>
+    <section>
+      <h3>Контекстные флаги</h3>
+      ${bulletList(contextFlags.length ? contextFlags : ["Критичных контекстных флагов нет."])}
+    </section>
+  </div>`;
+}
+
+function activeRiskFactors(items) {
+  return (items || []).filter((item) => Number(item?.points || 0) > 0);
+}
+
+function riskFactorList(items, fallback) {
+  if (!items.length) return bulletList([fallback]);
+  return `<ul>${items.map((item) => `<li><strong>${escapeHtml(item.label || item.key)}</strong>: +${metricNumber(item.points)} из ${metricNumber(item.max_points)}. ${escapeHtml(formatRiskValue(item))}${item.description ? ` ${escapeHtml(item.description)}` : ""}</li>`).join("")}</ul>`;
+}
+
+function formatRiskValue(item) {
+  const value = item?.value;
+  if (item?.value_type === "ratio") return `Значение: ${ratioPct(value) || "н/д"}.`;
+  if (item?.value_type === "USDT") return `Значение: ${money(value) || "н/д"}.`;
+  if (item?.value_type === "bps") return `Значение: ${metricNumber(value)} bps.`;
+  if (item?.value_type === "bool") return `Значение: ${value ? "да" : "нет"}.`;
+  return `Значение: ${metricNumber(value)}.`;
+}
+
+function riskLevel(score) {
+  if (score > 82) return "высокий";
+  if (score > 55) return "средний";
+  return "низкий";
+}
+
+function lateEntryLevel(score) {
+  if (score > 75) return "движение перегрето";
+  if (score > 45) return "есть риск догонять движение";
+  return "вход не выглядит поздним";
 }
 
 function skippedBecauseOfBlockingStage(stage, blockingStage) {
@@ -448,23 +512,6 @@ function fundamentalSummary(stage) {
     ["Цена 24ч", pctFromPercent(metrics.price_change_24h)],
     ["Цена 7д", pctFromPercent(metrics.price_change_7d)]
   ];
-  const socialRows = [
-    ["Соцтема", metrics.social_topic || "нет данных"],
-    ["Сила соцтемы", metrics.trend_strength || "нет данных"],
-    ["Фаза внимания", metrics.attention_phase || "нет данных"],
-    ["Посты 24ч", wholeNumber(metrics.social_posts_24h)],
-    ["Авторы 24ч", wholeNumber(metrics.social_authors_24h)],
-    ["Взаимодействия 24ч", wholeNumber(metrics.social_interactions_24h)]
-  ];
-  const scoreRows = [
-    ["Качество проекта", metrics.project_quality_level || scoreBand(metrics.project_quality_score, "quality")],
-    ["Нарратив", metrics.narrative_level || scoreBand(metrics.narrative_score, "narrative")],
-    ["Риск токеномики", metrics.tokenomics_risk_level || scoreBand(metrics.tokenomics_risk_score, "risk")]
-  ];
-  const socialItems = cleanList(metrics.social_theses_ru);
-  const socialFallback = metrics.lunarcrush_available
-    ? ["Содержательных соцтезисов нет, есть только рыночные алерты LunarCrush."]
-    : ["Данных LunarCrush пока нет."];
   return `<div class="stage-summary fundamental-summary">
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <div class="fundamental-card">
@@ -483,15 +530,6 @@ function fundamentalSummary(stage) {
         <h3>Почему могло двигаться</h3>
         <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
         ${bulletList(metrics.movement_type_reasons)}
-      </section>
-      <section>
-        <h3>Соцтренд</h3>
-        ${metrics.lunarcrush_available ? definitionList(socialRows) : ""}
-        ${bulletList(socialItems.length ? socialItems : socialFallback)}
-      </section>
-      <section>
-        <h3>Оценка</h3>
-        ${definitionList(scoreRows)}
       </section>
     </div>
   </div>`;

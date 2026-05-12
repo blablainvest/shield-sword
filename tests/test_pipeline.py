@@ -3,9 +3,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from hype_radar.engine import HypeRadarEngine, ScanConfig
+from hype_radar.engine import HypeRadarEngine, ScanConfig, _manipulation_status
 from hype_radar.models import Candle, Instrument, LongShortRatio, OrderbookStats, Ticker
-from hype_radar.storage import RadarStore
+from hype_radar.storage import RadarStore, _summary, _why_it_moved, lifecycle_label, manipulation_level
 from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
@@ -341,6 +341,32 @@ class PipelineTests(unittest.TestCase):
         for value, expected in cases:
             with self.subTest(value=value):
                 self.assertEqual(market_cap_to_fdv_profile(value)["level"], expected)
+
+    def test_risk_summary_uses_russian_explanations(self):
+        final = {
+            "manipulation_score": 56,
+            "late_entry_risk": 46,
+            "theme_lifecycle_stage": "exhaustion",
+            "hype_cause": ["volume_spike", "market_anomaly", "market_watch"],
+        }
+
+        summary = _summary(final)
+        why = _why_it_moved(final)
+
+        self.assertEqual(manipulation_level(55), "низкий")
+        self.assertEqual(manipulation_level(56), "средний")
+        self.assertEqual(manipulation_level(83), "высокий")
+        self.assertEqual(lifecycle_label("exhaustion"), "истощение движения")
+        self.assertTrue(all("Selected from" not in item for item in summary))
+        self.assertTrue(any("Риск позднего входа" in item for item in summary))
+        self.assertIn("всплеск объема", why[0])
+        self.assertIn("аномальное движение цены", why[0])
+
+    def test_manipulation_status_thresholds(self):
+        self.assertEqual(_manipulation_status(55), "pass")
+        self.assertEqual(_manipulation_status(56), "warn")
+        self.assertEqual(_manipulation_status(82), "warn")
+        self.assertEqual(_manipulation_status(83), "fail")
 
     def test_coingecko_search_is_cached_and_global_feeds_are_not_called(self):
         fake = RecordingCoinGecko()
