@@ -392,6 +392,8 @@ function openResearchCard(symbol, runId = "", researchId = "") {
     </div>
     <h2>Фундаментал</h2>
     ${stageSummary(card.fundamentals, blockingStage)}
+    <h2>Соцфильтр</h2>
+    ${stageSummary(card.sentiment, blockingStage)}
     <h2>Риск ликвидности / манипулятивности</h2>
     ${stageSummary(card.manipulation, blockingStage)}
     <h2>Теханализ</h2>
@@ -407,6 +409,7 @@ function openResearchCard(symbol, runId = "", researchId = "") {
 function stageSummary(stage, blockingStage = null) {
   if (stage?.stage === "manipulation_detector") return manipulationSummary(stage);
   if (stage?.metrics?.fundamental_label) return fundamentalSummary(stage);
+  if (stage?.stage === "social_filter" || stage?.metrics?.social_label) return socialSummary(stage);
   const reason = skippedBecauseOfBlockingStage(stage, blockingStage)
     ? `Этап не запускался, потому что пайплайн остановился раньше: ${stageLabel(blockingStage.stage)} — ${stageReason(blockingStage)}`
     : stageReason(stage);
@@ -414,6 +417,36 @@ function stageSummary(stage, blockingStage = null) {
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <p>${escapeHtml(reason || "Этап ещё не запускался.")}</p>
     ${stageMetricList(stage)}
+  </div>`;
+}
+
+function socialSummary(stage) {
+  const metrics = stage?.metrics || {};
+  const volumeRows = [
+    ["Social Volume", wholeNumber(metrics.social_volume_current ?? metrics.social_volume_24h)],
+    ["Baseline", wholeNumber(metrics.social_volume_baseline)],
+    ["Previous", wholeNumber(metrics.social_volume_previous)],
+    ["Velocity", velocityRatio(metrics.social_volume_velocity_ratio)],
+    ["Spike", pctFromPercent(metrics.social_volume_velocity_pct)],
+    ["Окно", metrics.social_volume_timeframe],
+    ["Источник", metrics.social_volume_source || metrics.data_coverage]
+  ];
+  const contextRows = [
+    ["Темы", metrics.topics],
+    ["Why moved", metrics.why_moved],
+    ["Alerts", metrics.alerts || metrics.supportive_causes],
+  ];
+  return `<div class="stage-summary social-summary">
+    <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
+    <p>${escapeHtml(stageReason(stage) || "Этап еще не запускался.")}</p>
+    <section>
+      <h3>Social Volume Velocity</h3>
+      ${definitionList(volumeRows)}
+    </section>
+    <section>
+      <h3>Контекст LunarCrush</h3>
+      ${definitionList(contextRows)}
+    </section>
   </div>`;
 }
 
@@ -575,7 +608,7 @@ function fundamentalSummary(stage) {
         <h3>Почему могло двигаться</h3>
         <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
         ${metrics.fundamental_label_reason ? `<p>${escapeHtml(metrics.fundamental_label_reason)}</p>` : ""}
-        ${bulletList(metrics.movement_type_reasons)}
+        ${bulletList(cleanList(metrics.movement_type_reasons).length ? metrics.movement_type_reasons : metrics.movement_supportive_ru)}
       </section>
     </div>
   </div>`;
