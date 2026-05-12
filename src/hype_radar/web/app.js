@@ -448,11 +448,6 @@ function fundamentalSummary(stage) {
     ["Цена 24ч", pctFromPercent(metrics.price_change_24h)],
     ["Цена 7д", pctFromPercent(metrics.price_change_7d)]
   ];
-  const tokenomicsRows = [
-    ["Циркуляция", ratioPct(metrics.circulating_supply_ratio) || "—"],
-    ["FDV / Market cap", metricNumber(metrics.fdv_to_market_cap)],
-    ["Разлок", metrics.unlock_risk_label || "нет данных"]
-  ];
   const communityRows = [
     ["Watchlist users", wholeNumber(metrics.watchlist_portfolio_users)],
     ["Sentiment up", pctFromPercent(metrics.sentiment_votes_up_percentage)],
@@ -505,10 +500,6 @@ function fundamentalSummary(stage) {
         ${definitionList(sizeRows)}
         ${metrics.fdv_tier_reason ? `<p>${escapeHtml(metrics.fdv_tier_reason)}</p>` : ""}
         ${metrics.market_cap_to_fdv_reason ? `<p>${escapeHtml(metrics.market_cap_to_fdv_reason)}</p>` : ""}
-      </section>
-      <section>
-        <h3>Токеномика</h3>
-        ${definitionList(tokenomicsRows)}
       </section>
       <section>
         <h3>Почему могло двигаться</h3>
