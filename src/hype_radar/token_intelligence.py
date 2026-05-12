@@ -129,6 +129,7 @@ class MppTokenIntelligenceClient:
         self.lunarcrush_url = os.getenv("LUNARCRUSH_URL") or "https://lunarcrush.com/api4"
         self.lunarcrush_key = os.getenv("LUNARCRUSH_API_KEY") or ""
         self.direct_coingecko = CoinGeckoClient()
+        self.identity_cache: Dict[str, TokenIdentity] = {}
         explicit = os.getenv("ENABLE_MPP_ENRICHMENT")
         self.enabled = explicit is None or explicit.lower() not in {"0", "false", "no", "off"}
 
@@ -145,8 +146,10 @@ class MppTokenIntelligenceClient:
 
     def _research_via_mpp(self, base_coin: str) -> Dict[str, Any]:
         errors: List[str] = []
-        search = self._safe_post(self.coingecko_url, "/coingecko/search", {"query": base_coin}, errors)
-        identity = select_coingecko_identity(base_coin, search)
+        identity, search = self._cached_identity(
+            base_coin,
+            lambda: self._safe_post(self.coingecko_url, "/coingecko/search", {"query": base_coin}, errors),
+        )
         if not identity.coin_id:
             return {
                 "base_coin": base_coin,
@@ -163,8 +166,6 @@ class MppTokenIntelligenceClient:
             {"vs_currency": "usd", "ids": identity.coin_id, "price_change_percentage": "24h,7d"},
             errors,
         )
-        trending = self._safe_get(self.coingecko_url, "/coingecko/trending", {}, errors)
-        categories = self._safe_get(self.coingecko_url, "/coingecko/categories", {}, errors)
         lunarcrush = self._lunarcrush_research(base_coin, errors)
 
         return {
@@ -175,8 +176,6 @@ class MppTokenIntelligenceClient:
                 "search": search,
                 "coin_data": coin_data,
                 "market": market,
-                "trending": trending,
-                "categories": categories,
             },
             "lunarcrush": lunarcrush,
             "errors": errors,
@@ -184,8 +183,10 @@ class MppTokenIntelligenceClient:
 
     def _research_direct(self, base_coin: str) -> Dict[str, Any]:
         errors: List[str] = []
-        search = self._safe_direct("coingecko/search", lambda: self.direct_coingecko.search(base_coin), errors)
-        identity = select_coingecko_identity(base_coin, search)
+        identity, search = self._cached_identity(
+            base_coin,
+            lambda: self._safe_direct("coingecko/search", lambda: self.direct_coingecko.search(base_coin), errors),
+        )
         lunarcrush = self._lunarcrush_research(base_coin, errors)
         if not identity.coin_id:
             return {
@@ -198,8 +199,6 @@ class MppTokenIntelligenceClient:
 
         coin_data = self._safe_direct("coingecko/coin", lambda: self.direct_coingecko.coin(identity.coin_id or ""), errors)
         market = self._safe_direct("coingecko/markets", lambda: self.direct_coingecko.markets(identity.coin_id or ""), errors)
-        trending = self._safe_direct("coingecko/trending", self.direct_coingecko.trending, errors)
-        categories = self._safe_direct("coingecko/categories", self.direct_coingecko.categories, errors)
 
         return {
             "base_coin": base_coin,
@@ -209,12 +208,19 @@ class MppTokenIntelligenceClient:
                 "search": search,
                 "coin_data": coin_data,
                 "market": market,
-                "trending": trending,
-                "categories": categories,
             },
             "lunarcrush": lunarcrush,
             "errors": errors,
         }
+
+    def _cached_identity(self, base_coin: str, search_callback: Any) -> tuple[TokenIdentity, Dict[str, Any]]:
+        key = base_coin.upper()
+        if key in self.identity_cache:
+            return self.identity_cache[key], {"cached": True, "query": base_coin}
+        search = search_callback()
+        identity = select_coingecko_identity(base_coin, search)
+        self.identity_cache[key] = identity
+        return identity, search if isinstance(search, dict) else {}
 
     def _tempo_configured(self) -> bool:
         return bool(shutil.which(self.tempo_bin) or os.path.exists(self.tempo_bin))
@@ -407,18 +413,30 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     volume = first_number(market_row.get("total_volume"), nested_number(market_data.get("total_volume"), "usd"))
     circulating = first_number(market_row.get("circulating_supply"), market_data.get("circulating_supply"))
     total_supply = first_number(market_row.get("total_supply"), market_data.get("total_supply"), market_data.get("max_supply"))
+    price_change_24h = first_number(
+        market_row.get("price_change_percentage_24h"),
+        market_row.get("price_change_percentage_24h_in_currency"),
+        nested_number(market_data.get("price_change_percentage_24h_in_currency"), "usd"),
+    )
+    price_change_7d = first_number(
+        market_row.get("price_change_percentage_7d_in_currency"),
+        nested_number(market_data.get("price_change_percentage_7d_in_currency"), "usd"),
+    )
     circ_ratio = circulating / total_supply if circulating and total_supply and total_supply > 0 else None
     fdv_to_market_cap = fdv / market_cap if fdv and market_cap and market_cap > 0 else None
+    market_cap_to_fdv = market_cap / fdv if market_cap and fdv and fdv > 0 else None
     volume_to_market_cap = volume / market_cap if volume and market_cap and market_cap > 0 else None
-    cap_tier = market_cap_tier(market_cap)
-    trending_ids = trending_coin_ids(coingecko.get("trending"))
-    category_momentum = category_momentum_score(categories, coingecko.get("categories"))
+    size_tier = fdv_tier(fdv)
+    supply_profile = market_cap_to_fdv_profile(market_cap_to_fdv)
     lunar_metrics = extract_lunarcrush_metrics(token_data.get("lunarcrush") or {})
     description = clean_text(nested_text(coin_data.get("description"), "en"))
     project_summary = first_text(description, lunar_metrics.get("project_summary"))
     sector = categories[0] if categories else None
     chain, address = first_contract_address(coin_data)
-    trend = trend_profile(identity.get("coin_id"), categories, trending_ids, category_momentum, lunar_metrics, volume_to_market_cap, circ_ratio)
+    link_metrics = coingecko_link_metrics(links)
+    community_metrics = coingecko_community_metrics(coin_data)
+    developer_metrics = coingecko_developer_metrics(coin_data)
+    trend = trend_profile(categories, lunar_metrics)
     source_conflict = taxonomy_source_conflict(sector, chain, trend.get("social_topic"))
     attention = attention_phase_profile(lunar_metrics)
     unlock = unlock_risk_profile(coin_data, lunar_metrics)
@@ -443,7 +461,7 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
                 "attention_phase": attention,
                 "market_cap": market_cap,
                 "fdv": fdv,
-                "circulating_supply_ratio": circ_ratio,
+                "market_cap_to_fdv_ratio": market_cap_to_fdv,
                 "volume_to_market_cap": volume_to_market_cap,
             },
         )
@@ -471,18 +489,22 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "contract_address": address,
         "categories": categories[:8],
         "market_cap": market_cap,
-        "market_cap_tier": cap_tier["tier"],
-        "market_cap_tier_label": cap_tier["label"],
-        "market_cap_tier_reason": cap_tier["reason"],
         "fdv": fdv,
+        "fdv_tier": size_tier["tier"],
+        "fdv_tier_label": size_tier["label"],
+        "fdv_tier_reason": size_tier["reason"],
         "fdv_to_market_cap": fdv_to_market_cap,
+        "market_cap_to_fdv_ratio": market_cap_to_fdv,
+        "market_cap_to_fdv_level": supply_profile["level"],
+        "market_cap_to_fdv_label": supply_profile["label"],
+        "market_cap_to_fdv_reason": supply_profile["reason"],
         "volume_24h": volume,
         "volume_to_market_cap": volume_to_market_cap,
+        "price_change_24h": price_change_24h,
+        "price_change_7d": price_change_7d,
         "circulating_supply": circulating,
         "total_or_max_supply": total_supply,
         "circulating_supply_ratio": circ_ratio,
-        "is_trending": identity.get("coin_id") in trending_ids,
-        "category_momentum_score": category_momentum,
         "trend_label": trend.get("label"),
         "trend_source": trend.get("source"),
         "social_topic": trend.get("social_topic"),
@@ -520,6 +542,9 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "social_dominance": lunar_metrics.get("social_dominance"),
         "sentiment": lunar_metrics.get("sentiment"),
         "influencers_count": lunar_metrics.get("influencers_count"),
+        **link_metrics,
+        **community_metrics,
+        **developer_metrics,
         "unlock_risk_label": unlock.get("label"),
         "unlock_mentions": unlock.get("mentions"),
         "unlock_relevance": unlock.get("relevance"),
@@ -550,42 +575,138 @@ def classify_fundamental(metrics: Dict[str, Any]) -> tuple[str, str]:
     return "Слабая база", "warn"
 
 
-def market_cap_tier(market_cap: Optional[float]) -> Dict[str, str]:
-    value = first_number(market_cap)
+def fdv_tier(fdv: Optional[float]) -> Dict[str, str]:
+    value = first_number(fdv)
     if value is None or value <= 0:
         return {
             "tier": "unknown",
-            "label": "Капитализация: нет данных",
-            "reason": "CoinGecko не дал market cap.",
+            "label": "FDV: нет данных",
+            "reason": "CoinGecko не дал fully diluted valuation.",
         }
     if value < 50_000_000:
         return {
             "tier": "tiny",
             "label": "Tiny cap / крошечная",
-            "reason": "Market cap ниже $50M: очень малая капитализация, максимальная чувствительность к манипуляциям.",
+            "reason": "FDV ниже $50M: очень малая оценка, максимальная чувствительность к манипуляциям.",
         }
     if value < 100_000_000:
         return {
             "tier": "low",
             "label": "Low cap / мелкая",
-            "reason": "Market cap от $50M до $100M: мелкая капитализация, выше риск манипуляций.",
+            "reason": "FDV от $50M до $100M: мелкая оценка, выше риск манипуляций.",
         }
     if value < 1_000_000_000:
         return {
             "tier": "mid",
             "label": "Mid cap / средняя",
-            "reason": "Market cap от $100M до $1B.",
+            "reason": "FDV от $100M до $1B.",
         }
     if value < 10_000_000_000:
         return {
             "tier": "big",
             "label": "Big cap / крупная",
-            "reason": "Market cap от $1B до $10B.",
+            "reason": "FDV от $1B до $10B.",
         }
     return {
         "tier": "giant",
         "label": "Giant cap / гигант",
-        "reason": "Market cap от $10B и выше.",
+        "reason": "FDV от $10B и выше.",
+    }
+
+
+def market_cap_tier(market_cap: Optional[float]) -> Dict[str, str]:
+    return fdv_tier(market_cap)
+
+
+def market_cap_to_fdv_profile(ratio: Optional[float]) -> Dict[str, str]:
+    value = first_number(ratio)
+    if value is None or value < 0:
+        return {
+            "level": "unknown",
+            "label": "MC/FDV: нет данных",
+            "reason": "Недостаточно данных, чтобы оценить долю supply в рынке.",
+        }
+    pct_value = value * 100.0
+    if pct_value > 100:
+        return {
+            "level": "anomaly",
+            "label": "MC/FDV выше 100%",
+            "reason": "MC выше FDV: возможна аномалия данных, не используем как надежный сигнал.",
+        }
+    if pct_value < 20:
+        return {
+            "level": "0-20",
+            "label": "0-20% supply в рынке",
+            "reason": "Очень низкая доля MC к FDV: сильный unlock/overhang risk.",
+        }
+    if pct_value < 40:
+        return {
+            "level": "20-40",
+            "label": "20-40% supply в рынке",
+            "reason": "Низкая доля MC к FDV: риск будущего размывания высокий.",
+        }
+    if pct_value < 60:
+        return {
+            "level": "40-60",
+            "label": "40-60% supply в рынке",
+            "reason": "Средняя доля MC к FDV.",
+        }
+    if pct_value < 80:
+        return {
+            "level": "60-80",
+            "label": "60-80% supply в рынке",
+            "reason": "Хорошая доля supply уже отражена в рынке.",
+        }
+    return {
+        "level": "80-100",
+        "label": "80-100% supply в рынке",
+        "reason": "Почти весь supply уже в рынке.",
+    }
+
+
+def coingecko_link_metrics(links: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(links, dict):
+        return {}
+    repos = links.get("repos_url") if isinstance(links.get("repos_url"), dict) else {}
+    return {
+        "homepage_url": first_link(links.get("homepage")),
+        "whitepaper_url": first_link(links.get("whitepaper")),
+        "twitter_screen_name": first_text(links.get("twitter_screen_name")),
+        "telegram_channel_identifier": first_text(links.get("telegram_channel_identifier")),
+        "subreddit_url": first_text(links.get("subreddit_url")),
+        "github_repos": compact_texts(repos.get("github") or [], 5) if isinstance(repos, dict) else [],
+    }
+
+
+def coingecko_community_metrics(coin_data: Dict[str, Any]) -> Dict[str, Any]:
+    community = coin_data.get("community_data") if isinstance(coin_data, dict) else {}
+    if not isinstance(community, dict):
+        community = {}
+    return {
+        "watchlist_portfolio_users": first_number(coin_data.get("watchlist_portfolio_users")) if isinstance(coin_data, dict) else None,
+        "sentiment_votes_up_percentage": first_number(coin_data.get("sentiment_votes_up_percentage")) if isinstance(coin_data, dict) else None,
+        "sentiment_votes_down_percentage": first_number(coin_data.get("sentiment_votes_down_percentage")) if isinstance(coin_data, dict) else None,
+        "telegram_channel_user_count": first_number(community.get("telegram_channel_user_count")),
+    }
+
+
+def coingecko_developer_metrics(coin_data: Dict[str, Any]) -> Dict[str, Any]:
+    developer = coin_data.get("developer_data") if isinstance(coin_data, dict) else {}
+    if not isinstance(developer, dict):
+        developer = {}
+    code_delta = developer.get("code_additions_deletions_4_weeks")
+    code_delta = code_delta if isinstance(code_delta, dict) else {}
+    return {
+        "github_stars": first_number(developer.get("stars")),
+        "github_forks": first_number(developer.get("forks")),
+        "github_subscribers": first_number(developer.get("subscribers")),
+        "github_total_issues": first_number(developer.get("total_issues")),
+        "github_closed_issues": first_number(developer.get("closed_issues")),
+        "github_pull_requests_merged": first_number(developer.get("pull_requests_merged")),
+        "github_pull_request_contributors": first_number(developer.get("pull_request_contributors")),
+        "github_commit_count_4_weeks": first_number(developer.get("commit_count_4_weeks")),
+        "github_code_additions_4_weeks": first_number(code_delta.get("additions")),
+        "github_code_deletions_4_weeks": first_number(code_delta.get("deletions")),
     }
 
 
@@ -760,21 +881,14 @@ def topic_sentiment_score(topic_data: Dict[str, Any]) -> Optional[float]:
 
 
 def trend_profile(
-    coin_id: Optional[str],
     categories: List[str],
-    trending_ids: set[str],
-    category_momentum: float,
     lunar: Dict[str, Any],
-    volume_to_market_cap: Optional[float],
-    circ_ratio: Optional[float],
 ) -> Dict[str, str]:
     topic = first_text(*(lunar.get("topics") or []))
     category = categories[0] if categories else None
     label = category or topic or "нет данных"
     if category:
         source = "CoinGecko category"
-    elif coin_id in trending_ids:
-        source = "CoinGecko trending"
     elif lunar.get("available") and topic:
         source = "LunarCrush social topic"
     else:
@@ -782,7 +896,7 @@ def trend_profile(
     social_growth = first_number(lunar.get("social_growth")) or 0.0
     if lunar.get("available") and (social_growth >= 70 or (lunar.get("galaxy_score") or 0) >= 70):
         strength = "высокая"
-    elif coin_id in trending_ids or category_momentum >= 0.5 or social_growth >= 35:
+    elif social_growth >= 35:
         strength = "средняя"
     elif label != "нет данных":
         strength = "низкая"
@@ -1112,7 +1226,7 @@ def fundamental_components(metrics: Dict[str, Any]) -> Dict[str, float]:
     fdv_ratio = metrics.get("fdv_to_market_cap")
     supply = 8.0 if circ_ratio is None else min(max(circ_ratio, 0.0) / 0.60 * 9.0, 9.0)
     supply += 6.0 if fdv_ratio is None else max(0.0, 6.0 - max(fdv_ratio - 1.0, 0.0) * 1.5)
-    trend = (8.0 if metrics.get("is_trending") else 0.0) + min(float(metrics.get("category_momentum_score") or 0.0) * 7.0, 7.0)
+    trend = min(float(metrics.get("narrative_score") or 0.0) / 100.0 * 15.0, 15.0)
     social = min(float(metrics.get("narrative_score") or 0.0) / 100.0 * 15.0, 15.0)
     public_risk = max(0.0, 10.0 - float(metrics.get("tokenomics_risk_score") or 0.0) / 10.0)
     peers = 5.0 + (5.0 if metrics.get("categories") else 0.0)
@@ -1302,6 +1416,12 @@ def first_text(*values: Any) -> Optional[str]:
     return None
 
 
+def first_link(value: Any) -> Optional[str]:
+    if isinstance(value, list):
+        return first_text(*value)
+    return first_text(value)
+
+
 def nested_text(payload: Any, key: str) -> Optional[str]:
     if isinstance(payload, dict):
         value = payload.get(key)
@@ -1438,34 +1558,6 @@ def first_number(*values: Any) -> Optional[float]:
             except ValueError:
                 continue
     return None
-
-
-def trending_coin_ids(payload: Any) -> set[str]:
-    coins = []
-    if isinstance(payload, dict):
-        coins = payload.get("coins") or []
-    ids = set()
-    for item in coins:
-        coin = item.get("item") if isinstance(item, dict) else None
-        if isinstance(coin, dict) and coin.get("id"):
-            ids.add(str(coin["id"]))
-    return ids
-
-
-def category_momentum_score(categories: List[str], payload: Any) -> float:
-    rows = payload if isinstance(payload, list) else payload.get("data") if isinstance(payload, dict) else []
-    if not isinstance(rows, list) or not categories:
-        return 0.0
-    category_terms = {category.lower() for category in categories}
-    best = 0.0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "").lower()
-        if name and any(name in term or term in name for term in category_terms):
-            change = first_number(row.get("market_cap_change_24h"), row.get("volume_24h_change_24h")) or 0.0
-            best = max(best, min(max(change, 0.0) / 10.0, 1.0))
-    return best
 
 
 def normalized_ratio(value: Any) -> Optional[float]:

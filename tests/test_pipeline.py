@@ -6,7 +6,14 @@ from datetime import datetime, timedelta, timezone
 from hype_radar.engine import HypeRadarEngine, ScanConfig
 from hype_radar.models import Candle, Instrument, LongShortRatio, OrderbookStats, Ticker
 from hype_radar.storage import RadarStore
-from hype_radar.token_intelligence import NullTokenIntelligenceClient, fundamentals_stage_payload, market_cap_tier, select_coingecko_identity
+from hype_radar.token_intelligence import (
+    MppTokenIntelligenceClient,
+    NullTokenIntelligenceClient,
+    fdv_tier,
+    fundamentals_stage_payload,
+    market_cap_to_fdv_profile,
+    select_coingecko_identity,
+)
 
 
 def test_engine(**kwargs):
@@ -133,7 +140,29 @@ def token_payload(base, coin_id="token", circ=80, total=100, market_cap=100_000_
             "coin_data": {
                 "categories": ["Artificial Intelligence"],
                 "description": {"en": "%s narrative token." % base},
-                "links": {"homepage": ["https://example.com/%s" % base.lower()]},
+                "links": {
+                    "homepage": ["https://example.com/%s" % base.lower()],
+                    "whitepaper": "https://example.com/%s.pdf" % base.lower(),
+                    "twitter_screen_name": "%s_token" % base.lower(),
+                    "telegram_channel_identifier": "%s_chat" % base.lower(),
+                    "subreddit_url": "https://reddit.com/r/%s" % base.lower(),
+                    "repos_url": {"github": ["https://github.com/example/%s" % base.lower()]},
+                },
+                "watchlist_portfolio_users": 12345,
+                "sentiment_votes_up_percentage": 64.5,
+                "sentiment_votes_down_percentage": 35.5,
+                "community_data": {"telegram_channel_user_count": 6789},
+                "developer_data": {
+                    "stars": 321,
+                    "forks": 22,
+                    "subscribers": 18,
+                    "total_issues": 44,
+                    "closed_issues": 36,
+                    "pull_requests_merged": 91,
+                    "pull_request_contributors": 12,
+                    "commit_count_4_weeks": 17,
+                    "code_additions_deletions_4_weeks": {"additions": 1500, "deletions": -240},
+                },
                 "market_data": {
                     "market_cap": {"usd": market_cap},
                     "fully_diluted_valuation": {"usd": fdv},
@@ -149,15 +178,49 @@ def token_payload(base, coin_id="token", circ=80, total=100, market_cap=100_000_
                     "market_cap": market_cap,
                     "fully_diluted_valuation": fdv,
                     "total_volume": volume,
+                    "price_change_percentage_24h": 12.5,
+                    "price_change_percentage_7d_in_currency": 24.0,
                     "circulating_supply": circ,
                     "total_supply": total,
                 }
             ],
-            "trending": {"coins": [{"item": {"id": coin_id}}]},
-            "categories": [{"name": "Artificial Intelligence", "market_cap_change_24h": 5}],
         },
         "errors": [],
     }
+
+
+class RecordingCoinGecko:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query):
+        self.calls.append(("search", query))
+        return {
+            "coins": [
+                {
+                    "id": "%s-token" % query.lower(),
+                    "symbol": query,
+                    "name": "%s Token" % query,
+                    "market_cap_rank": 500,
+                }
+            ]
+        }
+
+    def coin(self, coin_id):
+        self.calls.append(("coin", coin_id))
+        return token_payload(coin_id.replace("-token", "").upper(), coin_id=coin_id)["coingecko"]["coin_data"]
+
+    def markets(self, coin_id):
+        self.calls.append(("markets", coin_id))
+        return token_payload(coin_id.replace("-token", "").upper(), coin_id=coin_id)["coingecko"]["market"]
+
+    def trending(self):
+        self.calls.append(("trending", None))
+        raise AssertionError("CoinGecko trending must not be called")
+
+    def categories(self):
+        self.calls.append(("categories", None))
+        raise AssertionError("CoinGecko categories must not be called")
 
 
 class PipelineTests(unittest.TestCase):
@@ -251,14 +314,17 @@ class PipelineTests(unittest.TestCase):
         ).research_symbol("DWFUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
 
         fundamentals = [stage for stage in researched.stages if stage.stage == "fundamentals"][0]
-        self.assertEqual(fundamentals.status, "pass")
-        self.assertEqual(fundamentals.metrics["fundamental_label"], "Живой нарратив")
+        self.assertEqual(fundamentals.status, "warn")
+        self.assertEqual(fundamentals.metrics["fundamental_label"], "Слабая база")
         self.assertEqual(fundamentals.metrics["data_coverage"], "coingecko_only")
         self.assertIn("trend_label", fundamentals.metrics)
-        self.assertEqual(fundamentals.metrics["market_cap_tier"], "mid")
-        self.assertEqual(fundamentals.metrics["market_cap_tier_label"], "Mid cap / средняя")
+        self.assertEqual(fundamentals.metrics["fdv_tier"], "mid")
+        self.assertEqual(fundamentals.metrics["fdv_tier_label"], "Mid cap / средняя")
+        self.assertEqual(fundamentals.metrics["market_cap_to_fdv_level"], "20-40")
+        self.assertEqual(fundamentals.metrics["homepage_url"], "https://example.com/dwf")
+        self.assertEqual(fundamentals.metrics["github_stars"], 321)
 
-    def test_market_cap_tier_boundaries(self):
+    def test_fdv_tier_boundaries(self):
         cases = [
             (49_000_000, "tiny"),
             (50_000_000, "low"),
@@ -272,7 +338,42 @@ class PipelineTests(unittest.TestCase):
 
         for value, expected in cases:
             with self.subTest(value=value):
-                self.assertEqual(market_cap_tier(value)["tier"], expected)
+                self.assertEqual(fdv_tier(value)["tier"], expected)
+
+    def test_market_cap_to_fdv_profile_boundaries(self):
+        cases = [
+            (0.19, "0-20"),
+            (0.20, "20-40"),
+            (0.40, "40-60"),
+            (0.60, "60-80"),
+            (0.80, "80-100"),
+            (1.00, "80-100"),
+            (1.01, "anomaly"),
+            (None, "unknown"),
+        ]
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(market_cap_to_fdv_profile(value)["level"], expected)
+
+    def test_coingecko_search_is_cached_and_global_feeds_are_not_called(self):
+        fake = RecordingCoinGecko()
+        client = MppTokenIntelligenceClient()
+        client._tempo_configured = lambda: False
+        client.direct_coingecko = fake
+        client.lunarcrush_key = ""
+
+        first = client.research("DWF")
+        second = client.research("DWF")
+        calls = [name for name, _ in fake.calls]
+
+        self.assertEqual(first["identity"]["coin_id"], "dwf-token")
+        self.assertTrue(second["coingecko"]["search"]["cached"])
+        self.assertEqual(calls.count("search"), 1)
+        self.assertEqual(calls.count("coin"), 2)
+        self.assertEqual(calls.count("markets"), 2)
+        self.assertNotIn("trending", calls)
+        self.assertNotIn("categories", calls)
 
     def test_low_float_marks_fundamentals_weak_and_feeds_manipulation_risk(self):
         payload = token_payload("DROP", coin_id="drop-token", circ=20, total=100, market_cap=10_000_000, fdv=120_000_000, volume=200_000)

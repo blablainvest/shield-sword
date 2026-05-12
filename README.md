@@ -59,13 +59,13 @@ Research-карточка использует:
 - LunarCrush для соцтем, активности и кратких социальных тезисов;
 - Bybit для рыночного контекста, манипулятивности, фандинга, OI и базового технического наброска.
 
-CoinGecko в текущей схеме дает базовый паспорт проекта, а не инсайты. На одно research-исследование может уходить до пяти запросов:
+CoinGecko в текущей схеме дает базовый паспорт проекта, а не инсайты. На одно новое research-исследование используются только нужные запросы:
 
-- `search`: сопоставляет Bybit ticker с CoinGecko coin id;
-- `coin-data`: достает описание, категории, platforms, links и supply;
-- `coins-markets`: достает MC, FDV, объем и рыночные метрики;
-- `trending`: глобальный список трендовых монет, кандидат на кеш 6-24ч;
-- `categories`: глобальная динамика категорий, кандидат на кеш 6-24ч.
+- `search`: сопоставляет Bybit ticker с CoinGecko coin id; это resolver, результат кешируется локально в процессе;
+- `coin-data`: достает описание, категории, platforms/contracts, links, community и developer data;
+- `coins-markets`: достает FDV, MC, объем, supply и price changes.
+
+CoinGecko `trending` и `categories` не участвуют в фундаментальном вердикте: тренд определяем через отдельный social filter/LunarCrush, а не через глобальные CoinGecko списки.
 
 Nansen, DEX liquidity, on-chain holders и блеклисты сейчас не используются.
 

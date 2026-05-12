@@ -425,19 +425,49 @@ function skippedBecauseOfBlockingStage(stage, blockingStage) {
 
 function fundamentalSummary(stage) {
   const metrics = stage?.metrics || {};
+  const githubRepos = Array.isArray(metrics.github_repos) ? metrics.github_repos.join(", ") : metrics.github_repos;
   const identityRows = [
-    ["Название", metrics.name || "—"],
-    ["Сектор", metrics.sector || "—"],
-    ["Экосистема", metrics.chain_ecosystem || "—"],
-    ["Капитализация", metrics.market_cap_tier_label || "Капитализация: нет данных"],
-    ["Market cap", money(metrics.market_cap) || "—"],
+    ["Название", metrics.name],
+    ["Категория", metrics.sector],
+    ["Chain / ecosystem", metrics.chain_ecosystem],
+    ["Contract", metrics.contract_address],
+    ["Homepage", metrics.homepage_url],
+    ["Whitepaper", metrics.whitepaper_url],
+    ["X / Twitter", metrics.twitter_screen_name ? `@${metrics.twitter_screen_name}` : ""],
+    ["Telegram", metrics.telegram_channel_identifier],
+    ["Subreddit", metrics.subreddit_url],
+    ["GitHub", githubRepos],
+  ];
+  const sizeRows = [
+    ["FDV tier", metrics.fdv_tier_label || metrics.market_cap_tier_label || "FDV: нет данных"],
     ["FDV", money(metrics.fdv) || "—"],
+    ["Market cap", money(metrics.market_cap) || "—"],
+    ["MC / FDV", ratioPct(metrics.market_cap_to_fdv_ratio) || "—"],
+    ["Supply profile", metrics.market_cap_to_fdv_label],
+    ["Объем / Market cap", ratioPct(metrics.volume_to_market_cap) || "—"],
+    ["Цена 24ч", pctFromPercent(metrics.price_change_24h)],
+    ["Цена 7д", pctFromPercent(metrics.price_change_7d)]
   ];
   const tokenomicsRows = [
     ["Циркуляция", ratioPct(metrics.circulating_supply_ratio) || "—"],
     ["FDV / Market cap", metricNumber(metrics.fdv_to_market_cap)],
-    ["Объем / Market cap", ratioPct(metrics.volume_to_market_cap) || "—"],
     ["Разлок", metrics.unlock_risk_label || "нет данных"]
+  ];
+  const communityRows = [
+    ["Watchlist users", wholeNumber(metrics.watchlist_portfolio_users)],
+    ["Sentiment up", pctFromPercent(metrics.sentiment_votes_up_percentage)],
+    ["Sentiment down", pctFromPercent(metrics.sentiment_votes_down_percentage)],
+    ["Telegram users", wholeNumber(metrics.telegram_channel_user_count)],
+    ["GitHub stars", wholeNumber(metrics.github_stars)],
+    ["GitHub forks", wholeNumber(metrics.github_forks)],
+    ["GitHub subscribers", wholeNumber(metrics.github_subscribers)],
+    ["Issues", wholeNumber(metrics.github_total_issues)],
+    ["Closed issues", wholeNumber(metrics.github_closed_issues)],
+    ["Merged PRs", wholeNumber(metrics.github_pull_requests_merged)],
+    ["PR contributors", wholeNumber(metrics.github_pull_request_contributors)],
+    ["Commits 4w", wholeNumber(metrics.github_commit_count_4_weeks)],
+    ["Code additions 4w", wholeNumber(metrics.github_code_additions_4_weeks)],
+    ["Code deletions 4w", wholeNumber(metrics.github_code_deletions_4_weeks)]
   ];
   const socialRows = [
     ["Соцтема", metrics.social_topic || "нет данных"],
@@ -456,6 +486,12 @@ function fundamentalSummary(stage) {
   const socialFallback = metrics.lunarcrush_available
     ? ["Содержательных соцтезисов нет, есть только рыночные алерты LunarCrush."]
     : ["Данных LunarCrush пока нет."];
+  const communitySection = compactMetricRows(communityRows).length
+    ? `<section>
+        <h3>Community / Dev</h3>
+        ${definitionList(communityRows)}
+      </section>`
+    : "";
   return `<div class="stage-summary fundamental-summary">
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <div class="fundamental-card">
@@ -463,7 +499,12 @@ function fundamentalSummary(stage) {
         <h3>Кто перед нами</h3>
         <p>${escapeHtml(metrics.project_brief_ru || metrics.project_summary || "Данных пока нет.")}</p>
         ${definitionList(identityRows)}
-        ${metrics.market_cap_tier_reason ? `<p>${escapeHtml(metrics.market_cap_tier_reason)}</p>` : ""}
+      </section>
+      <section>
+        <h3>Размер и supply</h3>
+        ${definitionList(sizeRows)}
+        ${metrics.fdv_tier_reason ? `<p>${escapeHtml(metrics.fdv_tier_reason)}</p>` : ""}
+        ${metrics.market_cap_to_fdv_reason ? `<p>${escapeHtml(metrics.market_cap_to_fdv_reason)}</p>` : ""}
       </section>
       <section>
         <h3>Токеномика</h3>
@@ -474,8 +515,9 @@ function fundamentalSummary(stage) {
         <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
         ${bulletList(metrics.movement_type_reasons)}
       </section>
+      ${communitySection}
       <section>
-        <h3>Соцконтекст</h3>
+        <h3>Соцтренд</h3>
         ${metrics.lunarcrush_available ? definitionList(socialRows) : ""}
         ${bulletList(socialItems.length ? socialItems : socialFallback)}
       </section>
@@ -783,9 +825,21 @@ function stageMetricList(stage) {
 }
 
 function definitionList(rows) {
-  return `<dl class="metric-list">${rows.map(([label, value]) => `
+  const visibleRows = compactMetricRows(rows);
+  if (!visibleRows.length) return `<p>Данных пока нет.</p>`;
+  return `<dl class="metric-list">${visibleRows.map(([label, value]) => `
     <div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>
   `).join("")}</dl>`;
+}
+
+function compactMetricRows(rows) {
+  return (rows || [])
+    .map(([label, value]) => [label, Array.isArray(value) ? value.join(", ") : value])
+    .filter(([, value]) => {
+      if (value === null || value === undefined) return false;
+      const text = String(value).trim();
+      return text && text !== "—" && text !== "нет данных";
+    });
 }
 
 function metricNumber(value) {
@@ -870,6 +924,13 @@ function money(value) {
 function ratioPct(value) {
   if (value === null || value === undefined || value === "") return null;
   return `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+function pctFromPercent(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return `${number.toFixed(1)}%`;
 }
 
 function longShort(longValue, shortValue) {
