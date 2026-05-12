@@ -56,7 +56,7 @@ Bybit public market data работает без ключей. CoinGecko, LunarC
 Research-карточка использует:
 
 - CoinGecko для описания проекта, сектора, метрик MC/FDV/circulation;
-- LunarCrush для соцтем, активности и кратких социальных тезисов;
+- LunarCrush для соцтем, Social Volume / mentions velocity и кратких социальных тезисов;
 - Bybit для рыночного контекста, манипулятивности, фандинга, OI и структурированного технического анализа.
 
 ## Strategy identifier и ТА
@@ -79,6 +79,13 @@ CoinGecko в текущей схеме дает базовый паспорт п
 - `coins-markets`: достает FDV, MC, объем, supply и price changes.
 
 CoinGecko `trending` и `categories` не участвуют в фундаментальном вердикте: тренд определяем через отдельный social filter/LunarCrush, а не через глобальные CoinGecko списки.
+
+LunarCrush social filter использует только скорость распространения упоминаний:
+
+- primary mentions metric: `posts_active`;
+- legacy/fallback поля: `social_volume_24h`, `num_posts`, `posts_created`;
+- основной источник velocity: `/public/topic/:topic/time-series/v2?bucket=hour`;
+- sentiment, Galaxy Score, AltRank, spam, dominance, creators и top posts сохраняются как контекст, но не меняют verdict соцфильтра.
 
 Nansen, DEX liquidity, on-chain holders и блеклисты сейчас не используются.
 

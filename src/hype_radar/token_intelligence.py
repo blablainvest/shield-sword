@@ -242,6 +242,7 @@ class MppTokenIntelligenceClient:
             "coin": "/public/coins/%s/v1" % coin,
             "coin_meta": "/public/coins/%s/meta/v1" % coin,
             "topic": "/public/topic/%s/v1" % topic,
+            "topic_time_series": "/public/topic/%s/time-series/v2?bucket=hour" % topic,
             "whatsup": "/public/topic/%s/whatsup/v1" % topic,
             "posts": "/public/topic/%s/posts/v1" % topic,
             "news": "/public/topic/%s/news/v1" % topic,
@@ -522,8 +523,6 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "attention_phase": attention.get("phase"),
         "attention_phase_reasons": attention.get("reasons"),
         "social_velocity_level": social_strength_level(social_velocity_score(lunar_metrics)) if lunar_metrics.get("available") else "нет данных",
-        "social_quality_level": social_strength_level(social_quality_score(lunar_metrics)) if lunar_metrics.get("available") else "нет данных",
-        "hype_freshness_level": social_strength_level(hype_freshness_score(lunar_metrics)) if lunar_metrics.get("available") else "нет данных",
         "why_moved": lunar_metrics.get("why_moved") or trend.get("why_moved"),
         "social_posts_24h": lunar_metrics.get("social_activity_24h"),
         "social_authors_24h": lunar_metrics.get("social_contributors_24h"),
@@ -696,6 +695,7 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
     topic_data = lunar_endpoint_data(payload, "topic")
     meta_data = lunar_endpoint_data(payload, "coin_meta")
     post_rows = lunar_endpoint_list(payload, "posts")
+    time_series_rows = lunar_endpoint_list(payload, "topic_time_series")
     ai_summary = find_first_dict(root, ["ai_summary", "summary", "aiSummary"])
     metrics = find_first_dict(root, ["metrics", "market", "social_metrics"]) or {}
     asset = coin_data or topic_data or find_first_dict(root, ["asset", "coin", "topic"]) or {}
@@ -706,9 +706,23 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
     post_sentiments = [first_number(post.get("post_sentiment")) for post in post_rows if isinstance(post, dict)]
     post_sentiments = [value for value in post_sentiments if value is not None]
     avg_post_sentiment = sum(post_sentiments) / len(post_sentiments) if post_sentiments else None
-    social_activity = first_number(topic_data.get("num_posts"))
-    contributors = first_number(topic_data.get("num_contributors"))
-    interactions = first_number(topic_data.get("interactions_24h"))
+    volume_profile = social_volume_velocity_profile(topic_data, metrics, root, time_series_rows)
+    social_activity = first_number(
+        volume_profile.get("social_volume_24h"),
+        topic_data.get("num_posts"),
+    )
+    contributors = first_number(
+        topic_data.get("contributors_active"),
+        topic_data.get("num_contributors"),
+        find_number_by_key(metrics, ["contributors_active"]),
+        find_number_by_key(root, ["contributors_active"]),
+    )
+    interactions = first_number(
+        topic_data.get("interactions"),
+        topic_data.get("interactions_24h"),
+        find_number_by_key(metrics, ["interactions"]),
+        find_number_by_key(root, ["interactions"]),
+    )
 
     summary = clean_text(
         first_text(
@@ -763,6 +777,7 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
         "influencers_count": len(influencers),
         "sector": first_text(*(topic_names[:2])) or nested_text(asset, "category") or nested_text(asset, "sector"),
         "social_growth": social_growth,
+        **volume_profile,
         "social_activity_24h": social_activity,
         "social_contributors_24h": contributors,
         "social_interactions_24h": interactions,
@@ -787,6 +802,88 @@ def lunar_endpoint_list(payload: Dict[str, Any], key: str) -> List[Dict[str, Any
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     return []
+
+
+def social_volume_velocity_profile(
+    topic_data: Dict[str, Any],
+    metrics: Dict[str, Any],
+    root: Dict[str, Any],
+    time_series_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    series = social_volume_series(time_series_rows)
+    if series:
+        current = series[-1]["social_volume"]
+        previous = [row["social_volume"] for row in series[:-1] if row.get("social_volume") is not None]
+        baseline_values = previous[-24:] if previous else []
+        baseline = sum(baseline_values) / len(baseline_values) if baseline_values else None
+        ratio = current / baseline if baseline and baseline > 0 else None
+        pct = (ratio - 1.0) * 100.0 if ratio is not None else None
+        return {
+            "social_volume_24h": current,
+            "social_volume_current": current,
+            "social_volume_previous": previous[-1] if previous else None,
+            "social_volume_baseline": baseline,
+            "social_volume_velocity_ratio": ratio,
+            "social_volume_velocity_pct": pct,
+            "social_volume_timeframe": "hour",
+            "social_volume_points": len(series),
+            "social_volume_source": "topic_time_series",
+        }
+
+    current = first_number(
+        social_volume_value(topic_data),
+        find_number_by_key(metrics, ["posts_active", "social_volume_24h", "social_volume", "num_posts", "posts_created"]),
+        find_number_by_key(root, ["posts_active", "social_volume_24h", "social_volume", "num_posts", "posts_created"]),
+    )
+    growth = first_number(
+        find_number_by_key(metrics, ["social_growth", "social_change", "social_volume_24h_change"]),
+        find_number_by_key(root, ["social_growth", "social_change", "social_volume_24h_change"]),
+    )
+    ratio = social_growth_to_ratio(growth)
+    baseline = current / ratio if current is not None and ratio and ratio > 0 else None
+    pct = (ratio - 1.0) * 100.0 if ratio is not None else None
+    return {
+        "social_volume_24h": current,
+        "social_volume_current": current,
+        "social_volume_previous": baseline,
+        "social_volume_baseline": baseline,
+        "social_volume_velocity_ratio": ratio,
+        "social_volume_velocity_pct": pct,
+        "social_volume_timeframe": "24h" if current is not None else None,
+        "social_volume_points": 1 if current is not None else 0,
+        "social_volume_source": "topic_snapshot" if current is not None else None,
+    }
+
+
+def social_volume_series(rows: List[Dict[str, Any]]) -> List[Dict[str, float]]:
+    series: List[Dict[str, float]] = []
+    for row in rows:
+        volume = social_volume_value(row)
+        if volume is None:
+            continue
+        time_value = first_number(row.get("time"), row.get("timestamp"))
+        series.append({"time": time_value or float(len(series)), "social_volume": volume})
+    return sorted(series, key=lambda item: item["time"])
+
+
+def social_volume_value(row: Any) -> Optional[float]:
+    if not isinstance(row, dict):
+        return None
+    return first_number(
+        row.get("posts_active"),
+        row.get("social_volume_24h"),
+        row.get("social_volume"),
+        row.get("num_posts"),
+        row.get("posts_created"),
+    )
+
+
+def social_growth_to_ratio(value: Any) -> Optional[float]:
+    growth = first_number(value)
+    if growth is None:
+        return None
+    pct = growth if abs(growth) > 1.0 else growth * 100.0
+    return max(0.0, 1.0 + pct / 100.0)
 
 
 def safe_lunar_summary(value: Optional[str]) -> Optional[str]:
@@ -926,15 +1023,10 @@ def attention_phase_profile(lunar: Dict[str, Any]) -> Dict[str, Any]:
         return {"phase": "нет данных", "reasons": []}
     velocity = social_velocity_score(lunar)
     freshness = hype_freshness_score(lunar)
-    quality = social_quality_score(lunar)
-    coordination = coordination_risk_score(lunar)
     reasons = [
         "скорость соцтемы: %s" % social_strength_level(velocity),
         "свежесть внимания: %s" % social_strength_level(freshness),
-        "качество обсуждения: %s" % social_strength_level(quality),
     ]
-    if coordination >= 65:
-        reasons.append("риск координации: %s" % social_strength_level(coordination))
     if velocity >= 85 and freshness >= 75:
         return {"phase": "эйфория", "reasons": reasons}
     if velocity >= 70 and freshness >= 60:
@@ -1205,7 +1297,7 @@ def fundamental_components(metrics: Dict[str, Any]) -> Dict[str, float]:
     supply = 8.0 if circ_ratio is None else min(max(circ_ratio, 0.0) / 0.60 * 9.0, 9.0)
     supply += 6.0 if fdv_ratio is None else max(0.0, 6.0 - max(fdv_ratio - 1.0, 0.0) * 1.5)
     trend = min(float(metrics.get("narrative_score") or 0.0) / 100.0 * 15.0, 15.0)
-    social = min(float(metrics.get("narrative_score") or 0.0) / 100.0 * 15.0, 15.0)
+    social_velocity = min(float(metrics.get("narrative_score") or 0.0) / 100.0 * 15.0, 15.0)
     public_risk = max(0.0, 10.0 - float(metrics.get("tokenomics_risk_score") or 0.0) / 10.0)
     peers = 5.0 + (5.0 if metrics.get("categories") else 0.0)
     return {
@@ -1213,7 +1305,7 @@ def fundamental_components(metrics: Dict[str, Any]) -> Dict[str, float]:
         "market_cap_liquidity": round(min(market_liquidity, 15.0), 2),
         "fdv_supply_health": round(min(supply, 15.0), 2),
         "category_trend_strength": round(min(trend, 15.0), 2),
-        "lunarcrush_social_quality": round(social, 2),
+        "lunarcrush_social_velocity": round(social_velocity, 2),
         "public_tokenomics_risk": round(public_risk, 2),
         "peer_comparison": round(peers, 2),
     }
@@ -1229,32 +1321,49 @@ def social_stage_payload(token_data: Optional[Dict[str, Any]], fallback_score: f
             "metrics": {
                 "social_label": "Недостаточно данных",
                 "data_coverage": "none",
-                "fallback_market_social_quality": fallback_score,
+                "fallback_market_social_score": fallback_score,
             },
         }
 
     velocity = social_velocity_score(lunar)
-    quality = social_quality_score(lunar)
-    freshness = hype_freshness_score(lunar)
-    coordination = coordination_risk_score(lunar)
-    score = round(velocity * 0.30 + quality * 0.30 + freshness * 0.25 + (100.0 - coordination) * 0.15, 2)
-    if coordination >= 65:
-        status = "warn"
-        label = "Подозрительный соцшум"
-    elif freshness >= 65 and velocity >= 55:
+    current = first_number(lunar.get("social_volume_current"), lunar.get("social_volume_24h"))
+    ratio = first_number(lunar.get("social_volume_velocity_ratio"))
+    pct = first_number(lunar.get("social_volume_velocity_pct"))
+    if current is None:
+        return {
+            "status": "skipped",
+            "score": None,
+            "reason": "Соцфильтр пропущен: LunarCrush не вернул usable Social Volume / mentions.",
+            "metrics": {
+                "social_label": "Недостаточно данных",
+                "data_coverage": "none",
+            },
+        }
+
+    score = round(velocity, 2)
+    has_pass_volume = current >= 20
+    if ratio is not None and ratio >= 2.0 and has_pass_volume:
         status = "pass"
-        label = "Живой соцсигнал"
-    elif velocity >= 50:
+        label = "Резкий всплеск упоминаний"
+    elif pct is not None and pct >= 100.0 and has_pass_volume:
+        status = "pass"
+        label = "Резкий всплеск упоминаний"
+    elif ratio is not None and ratio >= 1.35:
         status = "warn"
-        label = "Массовый хайп"
+        label = "Ускорение упоминаний"
+    elif pct is not None and pct >= 35.0:
+        status = "warn"
+        label = "Ускорение упоминаний"
+    elif ratio is None and current > 0:
+        status = "warn"
+        label = "Есть Social Volume без истории"
     else:
         status = "warn"
-        label = "Слабый соцсигнал"
-    reason = "Соцфильтр: %s. Источник LunarCrush; скорость %s, качество %s, риск координации %s." % (
+        label = "Слабый всплеск упоминаний"
+    reason = "Соцфильтр: %s. Источник LunarCrush; Social Volume %.0f, velocity %s." % (
         label,
-        social_strength_level(velocity),
-        social_strength_level(quality),
-        social_strength_level(coordination),
+        current,
+        social_velocity_label(ratio, pct),
     )
     return {
         "status": status,
@@ -1264,12 +1373,15 @@ def social_stage_payload(token_data: Optional[Dict[str, Any]], fallback_score: f
             "social_label": label,
             "social_velocity_score": round(velocity, 2),
             "social_velocity_level": social_strength_level(velocity),
-            "social_quality_score": round(quality, 2),
-            "social_quality_level": social_strength_level(quality),
-            "hype_freshness_score": round(freshness, 2),
-            "hype_freshness_level": social_strength_level(freshness),
-            "coordination_risk_score": round(coordination, 2),
-            "coordination_risk_level": social_strength_level(coordination),
+            "social_volume_24h": lunar.get("social_volume_24h"),
+            "social_volume_current": current,
+            "social_volume_previous": lunar.get("social_volume_previous"),
+            "social_volume_baseline": lunar.get("social_volume_baseline"),
+            "social_volume_velocity_ratio": ratio,
+            "social_volume_velocity_pct": pct,
+            "social_volume_timeframe": lunar.get("social_volume_timeframe"),
+            "social_volume_points": lunar.get("social_volume_points"),
+            "social_volume_source": lunar.get("social_volume_source"),
             "sentiment": lunar.get("sentiment"),
             "social_growth": lunar.get("social_growth"),
             "social_dominance": lunar.get("social_dominance"),
@@ -1324,6 +1436,18 @@ def data_coverage_label(coingecko: Dict[str, Any], lunar: Dict[str, Any]) -> str
 
 
 def social_velocity_score(lunar: Dict[str, Any]) -> float:
+    ratio = first_number(lunar.get("social_volume_velocity_ratio"))
+    current = first_number(lunar.get("social_volume_current"), lunar.get("social_volume_24h"))
+    if ratio is not None:
+        if ratio >= 2.0:
+            return min(75.0 + (ratio - 2.0) * 12.5, 100.0)
+        if ratio >= 1.35:
+            return 50.0 + (ratio - 1.35) / 0.65 * 25.0
+        if ratio >= 1.0:
+            return 35.0 + (ratio - 1.0) / 0.35 * 15.0
+        return max(0.0, ratio * 35.0)
+    if current is not None and current > 0:
+        return 45.0
     growth = normalized_ratio(lunar.get("social_growth"))
     if growth is None:
         activity = first_number(lunar.get("social_activity_24h")) or 0.0
@@ -1336,19 +1460,12 @@ def social_velocity_score(lunar: Dict[str, Any]) -> float:
     return min(max(growth * 100.0, 0.0), 100.0)
 
 
-def social_quality_score(lunar: Dict[str, Any]) -> float:
-    score = 35.0
-    galaxy = normalized_ratio(lunar.get("galaxy_score"))
-    sentiment = normalized_ratio(lunar.get("sentiment"))
-    if galaxy is not None:
-        score += galaxy * 35.0
-    if sentiment is not None:
-        score += min(max(sentiment * 20.0, 0.0), 20.0)
-    if lunar.get("influencers_count"):
-        score += min(float(lunar.get("influencers_count") or 0.0) * 2.0, 10.0)
-    if lunar.get("summary"):
-        score += 10.0
-    return min(score, 100.0)
+def social_velocity_label(ratio: Optional[float], pct: Optional[float]) -> str:
+    if ratio is not None:
+        return "%.2fx" % ratio
+    if pct is not None:
+        return "%+.0f%%" % pct
+    return "нет истории"
 
 
 def hype_freshness_score(lunar: Dict[str, Any]) -> float:
@@ -1364,18 +1481,6 @@ def hype_freshness_score(lunar: Dict[str, Any]) -> float:
     if lunar.get("critical_causes"):
         score -= min(len(lunar.get("critical_causes") or []) * 8.0, 25.0)
     return min(max(score, 0.0), 100.0)
-
-
-def coordination_risk_score(lunar: Dict[str, Any]) -> float:
-    text = " ".join((lunar.get("critical_causes") or []) + (lunar.get("alerts") or [])).lower()
-    risk = 0.0
-    for term in ["spam", "bot", "coordinated", "pump", "paid", "shill", "manipulation", "fake"]:
-        if term in text:
-            risk += 18.0
-    dominance = normalized_ratio(lunar.get("social_dominance"))
-    if dominance is not None and dominance > 0.08:
-        risk += min(dominance * 220.0, 30.0)
-    return min(risk, 100.0)
 
 
 def clean_text(value: Any) -> Optional[str]:

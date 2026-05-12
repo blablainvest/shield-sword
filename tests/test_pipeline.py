@@ -10,10 +10,12 @@ from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
     classify_fundamental,
+    extract_lunarcrush_metrics,
     fdv_tier,
     fundamentals_stage_payload,
     market_cap_to_fdv_profile,
     select_coingecko_identity,
+    social_stage_payload,
 )
 
 
@@ -538,6 +540,110 @@ class PipelineTests(unittest.TestCase):
         ).research_symbol("DROPUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
 
         self.assertFalse(any(stage.stage == "blacklist_screen" for stage in researched.stages))
+
+    def test_lunarcrush_time_series_spike_passes_social_velocity_filter(self):
+        token_data = token_payload("B3", coin_id="b3-token")
+        token_data["lunarcrush"] = {
+            "topic": {"data": {"posts_active": 240, "contributors_active": 42, "interactions": 5000}},
+            "topic_time_series": {
+                "data": [
+                    {"time": 1, "posts_active": 90, "sentiment": 5, "spam": 90, "social_dominance": 50},
+                    {"time": 2, "posts_active": 100, "galaxy_score": 1},
+                    {"time": 3, "posts_active": 110, "alt_rank": 999},
+                    {"time": 4, "posts_active": 240},
+                ]
+            },
+            "posts": {"data": [{"post_title": "B3 mentions are accelerating"}]},
+            "creators": {"data": [{"name": "creator"}]},
+        }
+
+        stage = social_stage_payload(token_data, fallback_score=5.0)
+        metrics = stage["metrics"]
+
+        self.assertEqual(stage["status"], "pass")
+        self.assertEqual(metrics["social_label"], "Резкий всплеск упоминаний")
+        self.assertGreaterEqual(metrics["social_volume_velocity_ratio"], 2.0)
+        self.assertEqual(metrics["social_volume_source"], "topic_time_series")
+        self.assertNotIn("social_quality_score", metrics)
+        self.assertNotIn("coordination_risk_score", metrics)
+
+    def test_moderate_lunarcrush_growth_warns_social_velocity_filter(self):
+        token_data = token_payload("B3", coin_id="b3-token")
+        token_data["lunarcrush"] = {
+            "topic_time_series": {
+                "data": [
+                    {"time": 1, "posts_active": 100},
+                    {"time": 2, "posts_active": 105},
+                    {"time": 3, "posts_active": 100},
+                    {"time": 4, "posts_active": 140},
+                ]
+            }
+        }
+
+        stage = social_stage_payload(token_data, fallback_score=5.0)
+
+        self.assertEqual(stage["status"], "warn")
+        self.assertEqual(stage["metrics"]["social_label"], "Ускорение упоминаний")
+
+    def test_lunarcrush_snapshot_social_volume_falls_back_without_time_series(self):
+        token_data = token_payload("B3", coin_id="b3-token")
+        token_data["lunarcrush"] = {
+            "topic": {"data": {"posts_active": 180}},
+            "data": {"metrics": {"social_growth": 50}},
+        }
+
+        stage = social_stage_payload(token_data, fallback_score=5.0)
+        metrics = stage["metrics"]
+
+        self.assertEqual(stage["status"], "warn")
+        self.assertEqual(metrics["social_volume_source"], "topic_snapshot")
+        self.assertEqual(metrics["social_volume_current"], 180)
+        self.assertAlmostEqual(metrics["social_volume_velocity_ratio"], 1.5)
+
+    def test_missing_lunarcrush_social_volume_skips_social_filter(self):
+        stage = social_stage_payload({"lunarcrush": {"topic": {"data": {"name": "B3"}}}}, fallback_score=5.0)
+
+        self.assertEqual(stage["status"], "skipped")
+
+    def test_non_velocity_lunarcrush_fields_do_not_change_social_verdict(self):
+        base_payload = {
+            "topic_time_series": {
+                "data": [
+                    {"time": 1, "posts_active": 100},
+                    {"time": 2, "posts_active": 100},
+                    {"time": 3, "posts_active": 240},
+                ]
+            }
+        }
+        noisy_payload = {
+            **base_payload,
+            "topic": {"data": {"sentiment": 0, "spam": 9999, "social_dominance": 100, "galaxy_score": 1}},
+            "posts": {"data": [{"post_title": "pump bot spam shill"}]},
+            "creators": {"data": [{"name": "creator"}]},
+        }
+
+        base = social_stage_payload({"lunarcrush": base_payload}, fallback_score=5.0)
+        noisy = social_stage_payload({"lunarcrush": noisy_payload}, fallback_score=5.0)
+
+        self.assertEqual(noisy["status"], base["status"])
+        self.assertEqual(noisy["score"], base["score"])
+        self.assertNotIn("coordination_risk_score", noisy["metrics"])
+
+    def test_extract_lunarcrush_normalizes_posts_active_as_social_volume(self):
+        metrics = extract_lunarcrush_metrics(
+            {
+                "topic_time_series": {
+                    "data": [
+                        {"time": 1, "posts_active": 40},
+                        {"time": 2, "posts_active": 80},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(metrics["social_volume_current"], 80)
+        self.assertEqual(metrics["social_volume_previous"], 40)
+        self.assertEqual(metrics["social_volume_source"], "topic_time_series")
 
     def test_sqlite_history_round_trip(self):
         report = test_engine().scan(

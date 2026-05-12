@@ -865,10 +865,10 @@ function stageMetricList(stage) {
     rows.push(["Сила", metrics.trend_strength || "—"]);
     rows.push(["Циркуляция", ratioPct(metrics.circulating_supply_ratio) || "—"]);
   } else if (metrics.social_label) {
-    rows.push(["Скорость", metrics.social_velocity_level || socialLevel(metrics.social_velocity_score)]);
-    rows.push(["Качество", metrics.social_quality_level || socialLevel(metrics.social_quality_score)]);
-    rows.push(["Свежесть", metrics.hype_freshness_level || socialLevel(metrics.hype_freshness_score)]);
-    rows.push(["Риск координации", metrics.coordination_risk_level || socialLevel(metrics.coordination_risk_score)]);
+    rows.push(["Social Volume", wholeNumber(metrics.social_volume_current ?? metrics.social_volume_24h)]);
+    rows.push(["Velocity", velocityRatio(metrics.social_volume_velocity_ratio)]);
+    rows.push(["Spike", pctFromPercent(metrics.social_volume_velocity_pct)]);
+    rows.push(["Окно", metrics.social_volume_timeframe || "—"]);
   }
   if (!rows.length) return "";
   return `<dl class="metric-list">${rows.map(([label, value]) => `
@@ -932,6 +932,13 @@ function socialLevel(value) {
   if (number >= 70) return "высокая";
   if (number >= 40) return "средняя";
   return "низкая";
+}
+
+function velocityRatio(value) {
+  if (value === null || value === undefined || value === "") return "нет истории";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "нет истории";
+  return `${number.toFixed(2)}x`;
 }
 
 function stageLabel(stage) {

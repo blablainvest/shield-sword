@@ -803,9 +803,7 @@ def _add_risk_stages(
     manipulation_status = _manipulation_status(candidate.manipulation_score)
     fundamental_stage = next((stage for stage in pipeline.stages if stage.stage == "fundamentals"), None)
     supply_ratio = (fundamental_stage.metrics or {}).get("circulating_supply_ratio") if fundamental_stage else None
-    social_stage = next((stage for stage in pipeline.stages if stage.stage == "social_filter"), None)
     tokenomics_risk = (fundamental_stage.metrics or {}).get("tokenomics_risk_score") if fundamental_stage else None
-    social_coordination_risk = (social_stage.metrics or {}).get("coordination_risk_score") if social_stage else None
     intelligence_note = (
         " Публичный контекст CoinGecko/LunarCrush учтен; on-chain анализ намеренно вне scope."
         if token_data
@@ -833,8 +831,7 @@ def _add_risk_stages(
                 "circulating_supply_ratio": supply_ratio,
                 "circulating_supply_warn_threshold": 0.30,
                 "tokenomics_risk_score": tokenomics_risk,
-                "social_coordination_risk_score": social_coordination_risk,
-                "risk_contributors": _manipulation_contributors(candidate, supply_ratio, tokenomics_risk, social_coordination_risk),
+                "risk_contributors": _manipulation_contributors(candidate, supply_ratio, tokenomics_risk),
                 "supply_risk_policy": "warn if circulating_supply / total_or_max_supply < 0.30",
             },
             raw_source={"scores": candidate.to_dict().get("scores", {}), "features": candidate.to_dict().get("features", {})},
@@ -950,7 +947,6 @@ def _manipulation_contributors(
     candidate: Candidate,
     supply_ratio: Optional[float],
     tokenomics_risk: Optional[float],
-    social_coordination_risk: Optional[float],
 ) -> List[str]:
     contributors: List[str] = []
     if candidate.scores.liquidity < 45:
@@ -963,8 +959,6 @@ def _manipulation_contributors(
         contributors.append("низкая циркуляция <30%")
     if tokenomics_risk is not None and tokenomics_risk >= 60:
         contributors.append("повышенный tokenomics risk")
-    if social_coordination_risk is not None and social_coordination_risk >= 50:
-        contributors.append("риск координированного соцшума")
     return contributors[:5] or ["критичных факторов в доступных данных нет"]
 
 
