@@ -87,6 +87,17 @@ LunarCrush social filter использует только скорость ра
 - основной источник velocity: `/public/topic/:topic/time-series/v2?bucket=hour`;
 - sentiment, Galaxy Score, AltRank, spam, dominance, creators и top posts сохраняются как контекст, но не меняют verdict соцфильтра.
 
+## Что внутри research-карточки
+
+Карточка проекта в dashboard устроена как короткая investment memo плюс audit trail:
+
+- **Фундаментал**: CoinGecko identity, сектор, chain/ecosystem, FDV tier, FDV, market cap, MC/FDV, volume/market cap, supply profile, project brief, supporting factors и red flags.
+- **Соцфильтр**: LunarCrush Social Volume, baseline/previous volume, velocity ratio, spike %, окно измерения и источник (`topic_time_series` или `topic_snapshot`). Verdict строится только по скорости распространения упоминаний.
+- **Риск ликвидности / манипулятивности**: manipulation score, late entry risk, активные факторы риска, контекстные флаги по supply/tokenomics и рыночной структуре.
+- **Теханализ**: `strategy_identifier`, derivatives filter, TA signals и execution context. Derivatives filter включает funding, open interest, account long/short ratio и CVD по Bybit recent trades.
+- **Сетап**: локализованный trade plan: entry, safer entry, stop loss, take profits, risk/reward и reason. Если условия не набраны, карточка остается `Watch only`.
+- **Пайплайн**: полный technical audit trail по этапам (`fundamentals`, `social_filter`, `manipulation_detector`, `technical_analysis`, `trade_plan`, `final_ranking`) с raw metrics для отладки.
+
 Nansen, DEX liquidity, on-chain holders и блеклисты сейчас не используются.
 
 ## CLI
