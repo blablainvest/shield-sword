@@ -1,6 +1,6 @@
 import unittest
 
-from hype_radar.models import Candle, LongShortRatio, OrderbookStats, Ticker
+from hype_radar.models import Candle, CvdStats, LongShortRatio, OrderbookStats, Ticker
 from hype_radar.scoring import (
     MarketSnapshot,
     build_technical_analysis,
@@ -164,7 +164,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(block["signals"]["breakout_20d_high"]["status"], "insufficient_data")
         self.assertEqual(block["signals"]["atr_volatility_expansion"]["status"], "insufficient_data")
 
-    def test_strategy_context_includes_onchain_filter_and_execution_plan(self):
+    def test_strategy_context_includes_derivatives_filter_and_execution_plan(self):
         closes = [1.0 + i * 0.0005 for i in range(180)] + [1.18]
         candidate = score_snapshot(
             MarketSnapshot(
@@ -177,14 +177,19 @@ class ScoringTests(unittest.TestCase):
                     "D": candles_from_closes([1.0 + i * 0.01 for i in range(22)] + [1.45]),
                 },
                 long_short_ratio=LongShortRatio("CTXUSDT", long_ratio=0.40, short_ratio=0.60, timestamp_ms=1),
+                cvd=CvdStats("CTXUSDT", cvd_base=1250.0, buy_volume_base=5000.0, sell_volume_base=3750.0, trade_count=42, first_timestamp_ms=1, last_timestamp_ms=2),
             )
         )
 
         ta = candidate.technical_analysis
-        self.assertEqual(ta["onchain_filter"]["metrics"]["funding_rate"], -0.0008)
-        self.assertEqual(ta["onchain_filter"]["metrics"]["long_ratio"], 0.40)
-        self.assertEqual(ta["onchain_filter"]["metrics"]["long_short_ratio_status"], "available")
-        self.assertIn("cvd", ta["onchain_filter"]["metrics"])
+        derivatives = ta["derivatives_filter"]
+        self.assertEqual(derivatives["metrics"]["funding_rate"], -0.0008)
+        self.assertEqual(derivatives["metrics"]["long_ratio"], 0.40)
+        self.assertEqual(derivatives["metrics"]["long_short_ratio_status"], "available")
+        self.assertEqual(derivatives["metrics"]["cvd"]["status"], "available")
+        self.assertEqual(derivatives["metrics"]["cvd"]["cvd_base"], 1250.0)
+        self.assertNotIn("liquidation_clusters", derivatives["metrics"])
+        self.assertNotIn("oi_market_cap_ratio", derivatives["metrics"])
         self.assertEqual(ta["strategy_models"]["selected"], candidate.strategy_identifier)
         self.assertIn("entry_basis", ta["execution_context"])
         self.assertIn("trade_plan", ta["execution_context"])
@@ -240,11 +245,12 @@ class ScoringTests(unittest.TestCase):
             )
         )
 
-        onchain = candidate.technical_analysis["onchain_filter"]
-        self.assertEqual(onchain["status"], "partial")
-        self.assertEqual(onchain["metrics"]["long_short_ratio_status"], "unavailable")
-        self.assertIsNone(onchain["metrics"]["long_ratio"])
-        self.assertIsNone(onchain["metrics"]["short_ratio"])
+        derivatives = candidate.technical_analysis["derivatives_filter"]
+        self.assertEqual(derivatives["status"], "partial")
+        self.assertEqual(derivatives["metrics"]["long_short_ratio_status"], "unavailable")
+        self.assertIsNone(derivatives["metrics"]["long_ratio"])
+        self.assertIsNone(derivatives["metrics"]["short_ratio"])
+        self.assertEqual(derivatives["metrics"]["cvd"]["status"], "unavailable")
 
 
 def candidate_to_ticker(candidate):

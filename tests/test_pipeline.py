@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from hype_radar.engine import HypeRadarEngine, ScanConfig, _manipulation_status
-from hype_radar.models import Candle, Instrument, LongShortRatio, OrderbookStats, Ticker
+from hype_radar.models import Candle, CvdStats, Instrument, LongShortRatio, OrderbookStats, Ticker
 from hype_radar.storage import RadarStore, _summary, _why_it_moved, lifecycle_label, manipulation_level
 from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
@@ -82,6 +82,9 @@ class FakeBybit:
             "DROPUSDT": LongShortRatio(symbol, 0.41, 0.59, 123456),
         }
         return ratios.get(symbol)
+
+    def recent_trade_cvd(self, symbol, limit=1000, category="linear"):
+        return CvdStats(symbol, cvd_base=250.0, buy_volume_base=1250.0, sell_volume_base=1000.0, trade_count=30, first_timestamp_ms=1, last_timestamp_ms=2)
 
     def klines(self, symbol, interval, limit=200, category="linear"):
         candles = candles_from_closes(self.closes)
@@ -286,6 +289,7 @@ class PipelineTests(unittest.TestCase):
             },
         )
         self.assertIn("signals", researched.candidate.technical_analysis)
+        self.assertEqual(researched.candidate.technical_analysis["derivatives_filter"]["metrics"]["cvd"]["status"], "available")
         self.assertTrue(any(stage.stage == "technical_analysis" for stage in researched.stages))
         ta = [stage for stage in researched.stages if stage.stage == "technical_analysis"][0]
         self.assertEqual(ta.metrics["strategy_identifier"], researched.candidate.strategy_identifier)

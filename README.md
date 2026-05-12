@@ -70,7 +70,7 @@ Research-карточка использует:
 - `liquidity_sweep_strategy`;
 - `unknown`.
 
-Логика разделяет роли данных: onchain/derivatives и market-метрики помогают понять, **что** торговать, а блок `technical_analysis` помогает понять, **когда и где** искать вход, стоп и цели. ТА-блок строится из Bybit OHLCV и включает `breakout_20d_high`, `atr_volatility_expansion`, `rsi_signal`, `rsi_divergence`, `ema_cross`, `volume_spike`, `bollinger_squeeze`, `structure_break_hh_hl`. Если истории не хватает, конкретный сигнал возвращает `insufficient_data`, а не ломает пайплайн.
+Логика разделяет роли данных: derivatives/market-метрики Bybit помогают понять, **что** торговать, а блок `technical_analysis` помогает понять, **когда и где** искать вход, стоп и цели. ТА-блок строится из Bybit OHLCV и включает `breakout_20d_high`, `atr_volatility_expansion`, `rsi_signal`, `rsi_divergence`, `ema_cross`, `volume_spike`, `bollinger_squeeze`, `structure_break_hh_hl`. Дополнительно `derivatives_filter` использует funding, open interest, account long/short ratio и CVD, рассчитанный из Bybit public recent trades. Если истории не хватает, конкретный сигнал возвращает `insufficient_data`, а не ломает пайплайн.
 
 CoinGecko в текущей схеме дает базовый паспорт проекта, а не инсайты. На одно новое research-исследование используются только нужные запросы:
 
