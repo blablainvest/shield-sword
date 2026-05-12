@@ -127,6 +127,8 @@ class Candidate:
     price_24h_pct: float = 0.0
     turnover_24h: float = 0.0
     funding_rate: float = 0.0
+    strategy_identifier: str = "unknown"
+    technical_analysis: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)

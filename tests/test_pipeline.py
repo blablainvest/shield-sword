@@ -272,7 +272,22 @@ class PipelineTests(unittest.TestCase):
 
         researched = engine.research_symbol("DWFUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
         self.assertIsNotNone(researched.candidate)
+        self.assertIn(
+            researched.candidate.strategy_identifier,
+            {
+                "mean_reversion_extreme_funding",
+                "short_squeeze_model",
+                "oi_flush_model",
+                "volatility_breakout_squeeze",
+                "liquidity_sweep_strategy",
+                "unknown",
+            },
+        )
+        self.assertIn("signals", researched.candidate.technical_analysis)
         self.assertTrue(any(stage.stage == "technical_analysis" for stage in researched.stages))
+        ta = [stage for stage in researched.stages if stage.stage == "technical_analysis"][0]
+        self.assertEqual(ta.metrics["strategy_identifier"], researched.candidate.strategy_identifier)
+        self.assertIn("breakout_20d_high", ta.metrics["signals"])
         fundamentals = [stage for stage in researched.stages if stage.stage == "fundamentals"][0]
         manipulation = [stage for stage in researched.stages if stage.stage == "manipulation_detector"][0]
         self.assertEqual(fundamentals.metrics["circulating_supply_warn_threshold"], 0.30)

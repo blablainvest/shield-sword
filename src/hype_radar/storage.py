@@ -353,6 +353,7 @@ def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
     trade_plan = final.get("trade_plan") or {}
     scores = final.get("scores") or {}
     features = final.get("features") or {}
+    technical_analysis = final.get("technical_analysis") or {}
     stages = payload.get("stages") or []
     setup = _setup_label(final)
     return {
@@ -370,7 +371,8 @@ def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
         "manipulation": _stage_summary(stages, "manipulation_detector"),
         "technical_analysis": {
             "stage": _stage_summary(stages, "technical_analysis"),
-            "metrics": {
+            "metrics": technical_analysis
+            or {
                 "rsi_1h": features.get("rsi_1h"),
                 "atr_distance_1h": features.get("atr_distance_1h"),
                 "failed_breakout": features.get("failed_breakout"),
@@ -379,6 +381,7 @@ def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "ta_short": scores.get("ta_short"),
             },
         },
+        "strategy_identifier": final.get("strategy_identifier") or "unknown",
         "setup": {
             "label": setup,
             "reason": _setup_reason(final, trade_plan),

@@ -57,7 +57,20 @@ Research-карточка использует:
 
 - CoinGecko для описания проекта, сектора, метрик MC/FDV/circulation;
 - LunarCrush для соцтем, активности и кратких социальных тезисов;
-- Bybit для рыночного контекста, манипулятивности, фандинга, OI и базового технического наброска.
+- Bybit для рыночного контекста, манипулятивности, фандинга, OI и структурированного технического анализа.
+
+## Strategy identifier и ТА
+
+Каждая research-карточка получает машинно-читаемый `strategy_identifier`:
+
+- `mean_reversion_extreme_funding`;
+- `short_squeeze_model`;
+- `oi_flush_model`;
+- `volatility_breakout_squeeze`;
+- `liquidity_sweep_strategy`;
+- `unknown`.
+
+Логика разделяет роли данных: onchain/derivatives и market-метрики помогают понять, **что** торговать, а блок `technical_analysis` помогает понять, **когда и где** искать вход, стоп и цели. ТА-блок строится из Bybit OHLCV и включает `breakout_20d_high`, `atr_volatility_expansion`, `rsi_signal`, `rsi_divergence`, `ema_cross`, `volume_spike`, `bollinger_squeeze`, `structure_break_hh_hl`. Если истории не хватает, конкретный сигнал возвращает `insufficient_data`, а не ломает пайплайн.
 
 CoinGecko в текущей схеме дает базовый паспорт проекта, а не инсайты. На одно новое research-исследование используются только нужные запросы:
 

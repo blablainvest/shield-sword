@@ -381,7 +381,7 @@ function openResearchCard(symbol, runId = "", researchId = "") {
   const blockingStage = stages.find((stage) => stage?.blocking || stage?.status === "fail" || stage?.status === "error");
   document.getElementById("drawerContent").innerHTML = `
     <h1>${card.symbol}</h1>
-    <p>${setupLabel(setup.label)} | ${escapeHtml(setup.reason || "")}</p>
+    <p>${setupLabel(setup.label)} | ${escapeHtml(card.strategy_identifier || pipeline.candidate?.strategy_identifier || "unknown")} | ${escapeHtml(setup.reason || "")}</p>
     <h2>Резюме</h2>
     ${bulletList(card.summary)}
     <h2>Почему движение</h2>
@@ -395,8 +395,7 @@ function openResearchCard(symbol, runId = "", researchId = "") {
     <h2>Риск ликвидности / манипулятивности</h2>
     ${stageSummary(card.manipulation, blockingStage)}
     <h2>Теханализ</h2>
-    ${stageSummary(card.technical_analysis?.stage, blockingStage)}
-    <pre>${escapeHtml(JSON.stringify(card.technical_analysis?.metrics || {}, null, 2))}</pre>
+    ${technicalAnalysisSummary(card.technical_analysis, card.strategy_identifier || pipeline.candidate?.strategy_identifier)}
     <h2>Сетап</h2>
     <pre>${escapeHtml(JSON.stringify(localizedSetup(setup), null, 2))}</pre>
     <h2>Пайплайн</h2>
@@ -447,6 +446,52 @@ function manipulationSummary(stage) {
     <section>
       <h3>Контекстные флаги</h3>
       ${bulletList(contextFlags.length ? contextFlags : ["Критичных контекстных флагов нет."])}
+    </section>
+  </div>`;
+}
+
+function technicalAnalysisSummary(technicalAnalysis, fallbackStrategy) {
+  const stage = technicalAnalysis?.stage || {};
+  const metrics = technicalAnalysis?.metrics || {};
+  const signals = metrics.signals || {};
+  const signalRows = Object.entries(signals).map(([name, signal]) => [
+    name,
+    `${signal?.status || "нет данных"}: ${signal?.value === null || signal?.value === undefined ? "—" : signal.value}`
+  ]);
+  const onchain = metrics.onchain_filter?.metrics || {};
+  const derivativeRows = [
+    ["Status", metrics.onchain_filter?.status || "unavailable"],
+    ["Funding", pct(onchain.funding_rate) || "—"],
+    ["Open Interest", money(onchain.open_interest_value) || metricNumber(onchain.open_interest)],
+    ["Long / Short", longShort(onchain.long_ratio, onchain.short_ratio)],
+    ["L/S source", onchain.long_short_ratio_status || "unavailable"],
+    ["CVD", onchain.cvd?.status || "unavailable"],
+    ["Liquidation clusters", onchain.liquidation_clusters?.status || "unavailable"],
+    ["OI / Market Cap", onchain.oi_market_cap_ratio?.status || "unavailable"]
+  ];
+  const execution = metrics.execution_context || {};
+  return `<div class="stage-summary technical-summary">
+    <span class="badge ${stage.status || "skipped"}">${stageResultLabel(stage)}</span>
+    <p>${escapeHtml(metrics.principle || "Onchain/derivatives определяют что торговать; ТА определяет когда и где входить.")}</p>
+    <section>
+      <h3>Идентификатор стратегии</h3>
+      <p><strong>${escapeHtml(metrics.strategy_identifier || metrics.strategy_models?.selected || fallbackStrategy || "unknown")}</strong></p>
+    </section>
+    <section>
+      <h3>Onchain / derivatives filter</h3>
+      ${definitionList(derivativeRows)}
+    </section>
+    <section>
+      <h3>TA signals</h3>
+      ${definitionList(signalRows.length ? signalRows : [["status", "insufficient_data"]])}
+    </section>
+    <section>
+      <h3>Исполнение</h3>
+      ${definitionList([
+        ["Вход", execution.entry_basis || "TA confirmation"],
+        ["Stop-loss", execution.stop_loss_basis || "ATR / structure"],
+        ["Take-profit", execution.take_profit_basis || "structure / liquidity"]
+      ])}
     </section>
   </div>`;
 }

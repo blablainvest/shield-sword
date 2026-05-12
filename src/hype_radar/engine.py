@@ -166,6 +166,7 @@ class HypeRadarEngine:
                     instruments[ticker.symbol],
                     alt_market_return,
                     pipeline_by_symbol[ticker.symbol],
+                    long_short_ratios.get(ticker.symbol),
                 ): ticker.symbol
                 for ticker in selected
             }
@@ -362,17 +363,18 @@ class HypeRadarEngine:
         if not ticker or market_stage.status != "pass":
             return pipeline
 
+        long_short_ratio = self._long_short_ratio(ticker.symbol)
         _add_initial_selection_stage(
             pipeline,
             ticker,
             "manual_research",
             1,
             self._manual_window_metrics(ticker, _scan_window_hours(config)),
-            self._long_short_ratio(ticker.symbol),
+            long_short_ratio,
         )
         eligible_returns = [item.price_24h_pct for item in tickers if item.turnover_24h > 0]
         alt_market_return = mean(eligible_returns) / 24.0 if eligible_returns else 0.0
-        self._enrich_symbol(ticker, instrument, alt_market_return, pipeline)
+        self._enrich_symbol(ticker, instrument, alt_market_return, pipeline, long_short_ratio)
         return pipeline
 
     def _long_short_ratio(self, symbol: str) -> Optional[LongShortRatio]:
@@ -489,12 +491,13 @@ class HypeRadarEngine:
         instrument: Instrument,
         alt_market_return: float,
         pipeline: PipelineCandidate,
+        long_short_ratio: Optional[LongShortRatio] = None,
     ) -> Optional[Candidate]:
         candles = {
             "15": self.bybit.klines(ticker.symbol, "15", limit=96),
             "60": self.bybit.klines(ticker.symbol, "60", limit=200),
             "240": self.bybit.klines(ticker.symbol, "240", limit=120),
-            "D": self.bybit.klines(ticker.symbol, "D", limit=10),
+            "D": self.bybit.klines(ticker.symbol, "D", limit=30),
         }
         pipeline.add_raw(
             "bybit.klines",
@@ -523,7 +526,7 @@ class HypeRadarEngine:
             return None
         orderbook = self.bybit.orderbook(ticker.symbol, limit=50)
         pipeline.add_raw("bybit.orderbook_stats", asdict(orderbook))
-        snapshot = MarketSnapshot(ticker=ticker, orderbook=orderbook, candles=candles, alt_market_return_1h=alt_market_return)
+        snapshot = MarketSnapshot(ticker=ticker, orderbook=orderbook, candles=candles, alt_market_return_1h=alt_market_return, long_short_ratio=long_short_ratio)
         candidate = score_snapshot(snapshot)
         token_data = self._token_intelligence(pipeline)
         _add_context_stages(pipeline, candidate, token_data)
@@ -839,20 +842,25 @@ def _add_risk_stages(
         )
     )
     ta_status = "pass" if candidate.verdict in {"LONG_ENTER", "SHORT_ENTER", "LONG_WAIT_PULLBACK", "SHORT_WATCH"} else "warn"
+    ta_metrics = dict(candidate.technical_analysis or {})
+    ta_metrics.update(
+        {
+            "strategy_identifier": candidate.strategy_identifier,
+            "ta_long": candidate.scores.ta_long,
+            "ta_short": candidate.scores.ta_short,
+            "rsi_1h": candidate.features.rsi_1h,
+            "atr_distance_1h": candidate.features.atr_distance_1h,
+            "failed_breakout": candidate.features.failed_breakout,
+            "structure_breakdown": candidate.features.structure_breakdown,
+        }
+    )
     pipeline.add_stage(
         PipelineStageResult(
             stage="technical_analysis",
             status=ta_status,
             score=max(candidate.scores.ta_long, candidate.scores.ta_short),
             reason=candidate.reason_summary,
-            metrics={
-                "ta_long": candidate.scores.ta_long,
-                "ta_short": candidate.scores.ta_short,
-                "rsi_1h": candidate.features.rsi_1h,
-                "atr_distance_1h": candidate.features.atr_distance_1h,
-                "failed_breakout": candidate.features.failed_breakout,
-                "structure_breakdown": candidate.features.structure_breakdown,
-            },
+            metrics=ta_metrics,
             raw_source={"features": candidate.to_dict().get("features", {})},
             blocking=False,
         )
@@ -898,6 +906,7 @@ def _enforce_rr_stage(pipeline: PipelineCandidate, candidate: Candidate) -> None
                 "short_score": candidate.short_score,
                 "opportunity_score": candidate.opportunity_score,
                 "rank_bucket": candidate.rank_bucket,
+                "strategy_identifier": candidate.strategy_identifier,
             },
             raw_source={"candidate": candidate.to_dict()},
             blocking=candidate.verdict in {"AVOID", "SETUP_REJECTED_TA"},
