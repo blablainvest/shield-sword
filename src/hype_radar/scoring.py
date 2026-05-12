@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from .indicators import (
     atr,
@@ -19,7 +19,7 @@ from .indicators import (
     vwap,
     zscore,
 )
-from .models import Candidate, Candle, FeatureSet, OrderbookStats, ScoreBreakdown, Ticker, TradePlan
+from .models import Candidate, Candle, FeatureSet, LongShortRatio, OrderbookStats, ScoreBreakdown, Ticker, TradePlan
 
 
 @dataclass
@@ -28,6 +28,7 @@ class MarketSnapshot:
     orderbook: OrderbookStats
     candles: Dict[str, Sequence[Candle]]
     alt_market_return_1h: float = 0.0
+    long_short_ratio: Optional[LongShortRatio] = None
 
 
 def build_features(snapshot: MarketSnapshot) -> FeatureSet:
@@ -73,6 +74,7 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
     features = build_features(snapshot)
     ticker = snapshot.ticker
     orderbook = snapshot.orderbook
+    technical_analysis = build_technical_analysis(snapshot.candles)
 
     market_anomaly = clamp(
         8.0 * max(features.z_return_1h, 0.0)
@@ -134,6 +136,8 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
     confidence = confidence_score(snapshot, scores, features)
     trade_plan = make_trade_plan(direction_bias, verdict, snapshot, features)
     hype_cause = infer_hype_causes(features, manipulation)
+    strategy_identifier = select_strategy_identifier(ticker, features, technical_analysis, direction_bias, verdict, snapshot.long_short_ratio)
+    technical_analysis = enrich_strategy_context(technical_analysis, ticker, snapshot.long_short_ratio, strategy_identifier, trade_plan)
 
     return Candidate(
         symbol=ticker.symbol,
@@ -155,7 +159,296 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
         price_24h_pct=ticker.price_24h_pct,
         turnover_24h=ticker.turnover_24h,
         funding_rate=ticker.funding_rate,
+        strategy_identifier=strategy_identifier,
+        technical_analysis=technical_analysis,
     )
+
+
+def build_technical_analysis(candles: Dict[str, Sequence[Candle]]) -> Dict[str, object]:
+    candles_1h = list(candles.get("60") or [])
+    candles_1d = list(candles.get("D") or [])
+    signals = {
+        "breakout_20d_high": _breakout_20d_high(candles_1d),
+        "atr_volatility_expansion": _atr_volatility_expansion(candles_1h),
+        "rsi_signal": _rsi_signal(candles_1h),
+        "rsi_divergence": _rsi_divergence(candles_1h),
+        "ema_cross": _ema_cross(candles_1h),
+        "volume_spike": _volume_spike(candles_1h),
+        "bollinger_squeeze": _bollinger_squeeze(candles_1h),
+        "structure_break_hh_hl": _structure_break_hh_hl(candles_1h),
+    }
+    available = sum(1 for signal in signals.values() if signal["status"] == "available")
+    status = "available" if available >= 4 else "partial" if available else "insufficient_data"
+    return {
+        "status": status,
+        "principle": "onchain_metrics_define_what_to_trade;technical_analysis_defines_when_and_where",
+        "timeframes": {"primary": "60", "breakout": "D"},
+        "signals": signals,
+    }
+
+
+def select_strategy_identifier(
+    ticker: Ticker,
+    features: FeatureSet,
+    technical_analysis: Dict[str, object],
+    direction_bias: str,
+    verdict: str,
+    long_short_ratio: Optional[LongShortRatio] = None,
+) -> str:
+    signals = technical_analysis.get("signals") if isinstance(technical_analysis, dict) else {}
+    if not isinstance(signals, dict):
+        return "unknown"
+
+    breakout = _signal_value(signals, "breakout_20d_high") is True
+    atr_expansion = _signal_value(signals, "atr_volatility_expansion") is True
+    volume_spike_signal = _signal_value(signals, "volume_spike") is True
+    squeeze = _signal_value(signals, "bollinger_squeeze") is True
+    structure = _signal_value(signals, "structure_break_hh_hl")
+    ema_cross = _signal_value(signals, "ema_cross")
+    rsi_signal = _signal_value(signals, "rsi_signal")
+
+    long_ratio = long_short_ratio.long_ratio if long_short_ratio else None
+    short_ratio = long_short_ratio.short_ratio if long_short_ratio else None
+    long_crowded = long_ratio is not None and long_ratio >= 0.62
+    short_crowded = short_ratio is not None and short_ratio >= 0.62
+
+    if ticker.funding_rate <= -0.0005 and ticker.price_24h_pct > 0.06 and (breakout or volume_spike_signal or atr_expansion):
+        return "short_squeeze_model"
+    if ticker.price_24h_pct < -0.08 and (structure == "bearish_break" or volume_spike_signal):
+        return "oi_flush_model"
+    if ticker.funding_rate >= 0.001 and (rsi_signal == "overbought" or long_crowded):
+        return "mean_reversion_extreme_funding"
+    if ticker.funding_rate <= -0.001 and (rsi_signal == "oversold" or short_crowded):
+        return "mean_reversion_extreme_funding"
+    if (squeeze or breakout) and atr_expansion and ema_cross in {"bullish_cross", "bullish"}:
+        return "volatility_breakout_squeeze"
+    if features.failed_breakout or structure in {"bullish_sweep_reclaim", "bearish_break"} or verdict in {"SHORT_ENTER", "SHORT_WATCH"}:
+        return "liquidity_sweep_strategy"
+    if direction_bias == "NEUTRAL" or verdict in {"WATCH_ONLY", "AVOID"}:
+        return "unknown"
+    return "unknown"
+
+
+def enrich_strategy_context(
+    technical_analysis: Dict[str, object],
+    ticker: Ticker,
+    long_short_ratio: Optional[LongShortRatio],
+    strategy_identifier: str,
+    trade_plan: TradePlan,
+) -> Dict[str, object]:
+    enriched = dict(technical_analysis)
+    long_ratio = long_short_ratio.long_ratio if long_short_ratio else None
+    short_ratio = long_short_ratio.short_ratio if long_short_ratio else None
+    long_short_available = long_ratio is not None and short_ratio is not None
+    derivatives_status = "available" if long_short_available else "partial"
+    oi_market_cap_status = "unavailable"
+    enriched["onchain_filter"] = {
+        "status": derivatives_status,
+        "principle": "derivatives_and_onchain_metrics_define_what_to_trade",
+        "metrics": {
+            "funding_rate": ticker.funding_rate,
+            "open_interest": ticker.open_interest,
+            "open_interest_value": ticker.open_interest_value,
+            "long_ratio": long_ratio,
+            "short_ratio": short_ratio,
+            "long_short_ratio_status": "available" if long_short_available else "unavailable",
+            "long_short_timestamp_ms": long_short_ratio.timestamp_ms if long_short_ratio else None,
+            "cvd": {"status": "unavailable", "reason": "Bybit public OHLCV/ticker feed does not expose CVD in this pipeline yet."},
+            "liquidation_clusters": {"status": "unavailable", "reason": "Liquidation heatmap source is not configured yet."},
+            "oi_market_cap_ratio": {"status": oi_market_cap_status, "reason": "Market cap is provided by token intelligence stage, not by score_snapshot."},
+        },
+    }
+    enriched["strategy_identifier"] = strategy_identifier
+    enriched["strategy_models"] = {
+        "selected": strategy_identifier,
+        "supported": [
+            "mean_reversion_extreme_funding",
+            "short_squeeze_model",
+            "oi_flush_model",
+            "volatility_breakout_squeeze",
+            "liquidity_sweep_strategy",
+            "unknown",
+        ],
+    }
+    enriched["execution_context"] = {
+        "entry_basis": "TA confirmation signals define when/where to enter; do not use onchain/derivatives alone as an entry trigger.",
+        "stop_loss_basis": "ATR/recent structure from trade_plan.stop_loss and trade_plan.invalidation.",
+        "take_profit_basis": "Structure/liquidity-based targets approximated by trade_plan.take_profit_1/2/3.",
+        "trade_plan": trade_plan.to_dict() if hasattr(trade_plan, "to_dict") else {
+            "entry": trade_plan.entry,
+            "safer_entry": trade_plan.safer_entry,
+            "invalidation": trade_plan.invalidation,
+            "stop_loss": trade_plan.stop_loss,
+            "take_profit_1": trade_plan.take_profit_1,
+            "take_profit_2": trade_plan.take_profit_2,
+            "take_profit_3": trade_plan.take_profit_3,
+            "risk_reward": trade_plan.risk_reward,
+            "risk_note": trade_plan.risk_note,
+        },
+    }
+    return enriched
+
+
+def _signal_value(signals: Dict[str, object], name: str) -> object:
+    signal = signals.get(name)
+    if isinstance(signal, dict):
+        return signal.get("value")
+    return None
+
+
+def _available(value: object, detail: Dict[str, object] | None = None) -> Dict[str, object]:
+    payload: Dict[str, object] = {"status": "available", "value": value}
+    if detail:
+        payload.update(detail)
+    return payload
+
+
+def _insufficient(required: int, actual: int) -> Dict[str, object]:
+    return {"status": "insufficient_data", "value": None, "required_candles": required, "actual_candles": actual}
+
+
+def _breakout_20d_high(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 21:
+        return _insufficient(21, len(candles))
+    prior_high = max(candle.high for candle in candles[-21:-1])
+    latest = candles[-1]
+    return _available(latest.close > prior_high, {"prior_20d_high": rounded_price(prior_high), "close": rounded_price(latest.close)})
+
+
+def _atr_volatility_expansion(candles: Sequence[Candle]) -> Dict[str, object]:
+    period = 14
+    if len(candles) < period * 2 + 1:
+        return _insufficient(period * 2 + 1, len(candles))
+    current = atr(candles, period)
+    previous_ranges = _true_ranges(candles[-(period * 2 + 1) : -period])
+    baseline = _avg(previous_ranges)
+    ratio = safe_div(current, baseline, 0.0)
+    return _available(ratio >= 1.35, {"atr": current, "baseline_atr": baseline, "expansion_ratio": round(ratio, 4)})
+
+
+def _rsi_signal(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 15:
+        return _insufficient(15, len(candles))
+    value = rsi(candles)
+    if value >= 72.0:
+        signal = "overbought"
+    elif value <= 30.0:
+        signal = "oversold"
+    elif value >= 55.0:
+        signal = "bullish"
+    elif value <= 45.0:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+    return _available(signal, {"rsi_1h": round(value, 4)})
+
+
+def _rsi_divergence(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 35:
+        return _insufficient(35, len(candles))
+    current_rsi = rsi(candles[-15:])
+    prior_window = candles[-35:-15]
+    prior_rsi = rsi(prior_window)
+    latest_close = candles[-1].close
+    prior_high = max(candle.close for candle in prior_window)
+    prior_low = min(candle.close for candle in prior_window)
+    if latest_close > prior_high and current_rsi < prior_rsi - 5.0:
+        value = "bearish"
+    elif latest_close < prior_low and current_rsi > prior_rsi + 5.0:
+        value = "bullish"
+    else:
+        value = "none"
+    return _available(value, {"current_rsi": round(current_rsi, 4), "prior_rsi": round(prior_rsi, 4)})
+
+
+def _ema_cross(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 35:
+        return _insufficient(35, len(candles))
+    closes = [candle.close for candle in candles]
+    ema12 = _ema_series(closes, 12)
+    ema26 = _ema_series(closes, 26)
+    previous_delta = ema12[-2] - ema26[-2]
+    current_delta = ema12[-1] - ema26[-1]
+    if previous_delta <= 0 < current_delta:
+        value = "bullish_cross"
+    elif previous_delta >= 0 > current_delta:
+        value = "bearish_cross"
+    elif current_delta > 0:
+        value = "bullish"
+    elif current_delta < 0:
+        value = "bearish"
+    else:
+        value = "none"
+    return _available(value, {"ema_12": rounded_price(ema12[-1]), "ema_26": rounded_price(ema26[-1])})
+
+
+def _volume_spike(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 21:
+        return _insufficient(21, len(candles))
+    baseline = _avg([candle.volume for candle in candles[-21:-1]])
+    ratio = safe_div(candles[-1].volume, baseline, 0.0)
+    return _available(ratio >= 2.0, {"volume_ratio": round(ratio, 4)})
+
+
+def _bollinger_squeeze(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 40:
+        return _insufficient(40, len(candles))
+    current_width = _bollinger_width([candle.close for candle in candles[-20:]])
+    previous_widths = [_bollinger_width([candle.close for candle in candles[index - 20 : index]]) for index in range(len(candles) - 19, len(candles))]
+    baseline = _avg([width for width in previous_widths if width > 0])
+    ratio = safe_div(current_width, baseline, 0.0)
+    return _available(current_width <= 0.08 and ratio <= 0.75, {"band_width": round(current_width, 4), "width_ratio": round(ratio, 4)})
+
+
+def _structure_break_hh_hl(candles: Sequence[Candle]) -> Dict[str, object]:
+    if len(candles) < 12:
+        return _insufficient(12, len(candles))
+    prior = candles[-12:-1]
+    recent = candles[-6:]
+    latest = candles[-1]
+    prior_high = max(candle.high for candle in prior)
+    prior_low = min(candle.low for candle in prior)
+    higher_lows = min(candle.low for candle in recent[-3:]) > min(candle.low for candle in recent[:3])
+    if latest.close > prior_high and higher_lows:
+        value = "bullish_hh_hl"
+    elif latest.low < prior_low and latest.close > prior_low:
+        value = "bullish_sweep_reclaim"
+    elif latest.close < prior_low:
+        value = "bearish_break"
+    else:
+        value = "none"
+    return _available(value, {"prior_high": rounded_price(prior_high), "prior_low": rounded_price(prior_low)})
+
+
+def _true_ranges(candles: Sequence[Candle]) -> List[float]:
+    ranges: List[float] = []
+    for previous, current in zip(candles, candles[1:]):
+        ranges.append(max(current.high - current.low, abs(current.high - previous.close), abs(current.low - previous.close)))
+    return ranges
+
+
+def _ema_series(values: Sequence[float], period: int) -> List[float]:
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    series = [values[0]]
+    for value in values[1:]:
+        series.append(value * alpha + series[-1] * (1.0 - alpha))
+    return series
+
+
+def _bollinger_width(values: Sequence[float]) -> float:
+    middle = _avg(values)
+    if middle <= 0:
+        return 0.0
+    variance = _avg([(value - middle) ** 2 for value in values])
+    stdev = variance ** 0.5
+    return safe_div(4.0 * stdev, middle, 0.0)
+
+
+def _avg(values: Sequence[float]) -> float:
+    clean = list(values)
+    return sum(clean) / len(clean) if clean else 0.0
 
 
 def liquidity_score(orderbook: OrderbookStats) -> float:
