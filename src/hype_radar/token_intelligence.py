@@ -159,7 +159,16 @@ class MppTokenIntelligenceClient:
                 "errors": errors,
             }
 
-        coin_data = self._safe_get(self.coingecko_url, "/coingecko/coin-data", {"id": identity.coin_id}, errors)
+        coin_data = self._safe_get(
+            self.coingecko_url,
+            "/coingecko/coin-data",
+            {
+                "id": identity.coin_id,
+                "community_data": "false",
+                "developer_data": "false",
+            },
+            errors,
+        )
         market = self._safe_get(
             self.coingecko_url,
             "/coingecko/coins-markets",
@@ -434,8 +443,6 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     sector = categories[0] if categories else None
     chain, address = first_contract_address(coin_data)
     link_metrics = coingecko_link_metrics(links)
-    community_metrics = coingecko_community_metrics(coin_data)
-    developer_metrics = coingecko_developer_metrics(coin_data)
     trend = trend_profile(categories, lunar_metrics)
     source_conflict = taxonomy_source_conflict(sector, chain, trend.get("social_topic"))
     attention = attention_phase_profile(lunar_metrics)
@@ -543,8 +550,6 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "sentiment": lunar_metrics.get("sentiment"),
         "influencers_count": lunar_metrics.get("influencers_count"),
         **link_metrics,
-        **community_metrics,
-        **developer_metrics,
         "unlock_risk_label": unlock.get("label"),
         "unlock_mentions": unlock.get("mentions"),
         "unlock_relevance": unlock.get("relevance"),
@@ -675,38 +680,6 @@ def coingecko_link_metrics(links: Dict[str, Any]) -> Dict[str, Any]:
         "telegram_channel_identifier": first_text(links.get("telegram_channel_identifier")),
         "subreddit_url": first_text(links.get("subreddit_url")),
         "github_repos": compact_texts(repos.get("github") or [], 5) if isinstance(repos, dict) else [],
-    }
-
-
-def coingecko_community_metrics(coin_data: Dict[str, Any]) -> Dict[str, Any]:
-    community = coin_data.get("community_data") if isinstance(coin_data, dict) else {}
-    if not isinstance(community, dict):
-        community = {}
-    return {
-        "watchlist_portfolio_users": first_number(coin_data.get("watchlist_portfolio_users")) if isinstance(coin_data, dict) else None,
-        "sentiment_votes_up_percentage": first_number(coin_data.get("sentiment_votes_up_percentage")) if isinstance(coin_data, dict) else None,
-        "sentiment_votes_down_percentage": first_number(coin_data.get("sentiment_votes_down_percentage")) if isinstance(coin_data, dict) else None,
-        "telegram_channel_user_count": first_number(community.get("telegram_channel_user_count")),
-    }
-
-
-def coingecko_developer_metrics(coin_data: Dict[str, Any]) -> Dict[str, Any]:
-    developer = coin_data.get("developer_data") if isinstance(coin_data, dict) else {}
-    if not isinstance(developer, dict):
-        developer = {}
-    code_delta = developer.get("code_additions_deletions_4_weeks")
-    code_delta = code_delta if isinstance(code_delta, dict) else {}
-    return {
-        "github_stars": first_number(developer.get("stars")),
-        "github_forks": first_number(developer.get("forks")),
-        "github_subscribers": first_number(developer.get("subscribers")),
-        "github_total_issues": first_number(developer.get("total_issues")),
-        "github_closed_issues": first_number(developer.get("closed_issues")),
-        "github_pull_requests_merged": first_number(developer.get("pull_requests_merged")),
-        "github_pull_request_contributors": first_number(developer.get("pull_request_contributors")),
-        "github_commit_count_4_weeks": first_number(developer.get("commit_count_4_weeks")),
-        "github_code_additions_4_weeks": first_number(code_delta.get("additions")),
-        "github_code_deletions_4_weeks": first_number(code_delta.get("deletions")),
     }
 
 

@@ -62,7 +62,7 @@ Research-карточка использует:
 CoinGecko в текущей схеме дает базовый паспорт проекта, а не инсайты. На одно новое research-исследование используются только нужные запросы:
 
 - `search`: сопоставляет Bybit ticker с CoinGecko coin id; это resolver, результат кешируется локально в процессе;
-- `coin-data`: достает описание, категории, platforms/contracts, links, community и developer data;
+- `coin-data`: достает описание, категории, platforms/contracts и links; community/developer data отключены;
 - `coins-markets`: достает FDV, MC, объем, supply и price changes.
 
 CoinGecko `trending` и `categories` не участвуют в фундаментальном вердикте: тренд определяем через отдельный social filter/LunarCrush, а не через глобальные CoinGecko списки.

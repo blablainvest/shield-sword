@@ -148,21 +148,6 @@ def token_payload(base, coin_id="token", circ=80, total=100, market_cap=100_000_
                     "subreddit_url": "https://reddit.com/r/%s" % base.lower(),
                     "repos_url": {"github": ["https://github.com/example/%s" % base.lower()]},
                 },
-                "watchlist_portfolio_users": 12345,
-                "sentiment_votes_up_percentage": 64.5,
-                "sentiment_votes_down_percentage": 35.5,
-                "community_data": {"telegram_channel_user_count": 6789},
-                "developer_data": {
-                    "stars": 321,
-                    "forks": 22,
-                    "subscribers": 18,
-                    "total_issues": 44,
-                    "closed_issues": 36,
-                    "pull_requests_merged": 91,
-                    "pull_request_contributors": 12,
-                    "commit_count_4_weeks": 17,
-                    "code_additions_deletions_4_weeks": {"additions": 1500, "deletions": -240},
-                },
                 "market_data": {
                     "market_cap": {"usd": market_cap},
                     "fully_diluted_valuation": {"usd": fdv},
@@ -322,7 +307,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(fundamentals.metrics["fdv_tier_label"], "Mid cap / средняя")
         self.assertEqual(fundamentals.metrics["market_cap_to_fdv_level"], "20-40")
         self.assertEqual(fundamentals.metrics["homepage_url"], "https://example.com/dwf")
-        self.assertEqual(fundamentals.metrics["github_stars"], 321)
+        self.assertNotIn("github_stars", fundamentals.metrics)
+        self.assertNotIn("watchlist_portfolio_users", fundamentals.metrics)
 
     def test_fdv_tier_boundaries(self):
         cases = [

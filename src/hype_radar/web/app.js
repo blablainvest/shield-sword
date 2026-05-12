@@ -448,22 +448,6 @@ function fundamentalSummary(stage) {
     ["Цена 24ч", pctFromPercent(metrics.price_change_24h)],
     ["Цена 7д", pctFromPercent(metrics.price_change_7d)]
   ];
-  const communityRows = [
-    ["Watchlist users", wholeNumber(metrics.watchlist_portfolio_users)],
-    ["Sentiment up", pctFromPercent(metrics.sentiment_votes_up_percentage)],
-    ["Sentiment down", pctFromPercent(metrics.sentiment_votes_down_percentage)],
-    ["Telegram users", wholeNumber(metrics.telegram_channel_user_count)],
-    ["GitHub stars", wholeNumber(metrics.github_stars)],
-    ["GitHub forks", wholeNumber(metrics.github_forks)],
-    ["GitHub subscribers", wholeNumber(metrics.github_subscribers)],
-    ["Issues", wholeNumber(metrics.github_total_issues)],
-    ["Closed issues", wholeNumber(metrics.github_closed_issues)],
-    ["Merged PRs", wholeNumber(metrics.github_pull_requests_merged)],
-    ["PR contributors", wholeNumber(metrics.github_pull_request_contributors)],
-    ["Commits 4w", wholeNumber(metrics.github_commit_count_4_weeks)],
-    ["Code additions 4w", wholeNumber(metrics.github_code_additions_4_weeks)],
-    ["Code deletions 4w", wholeNumber(metrics.github_code_deletions_4_weeks)]
-  ];
   const socialRows = [
     ["Соцтема", metrics.social_topic || "нет данных"],
     ["Сила соцтемы", metrics.trend_strength || "нет данных"],
@@ -481,12 +465,6 @@ function fundamentalSummary(stage) {
   const socialFallback = metrics.lunarcrush_available
     ? ["Содержательных соцтезисов нет, есть только рыночные алерты LunarCrush."]
     : ["Данных LunarCrush пока нет."];
-  const communitySection = compactMetricRows(communityRows).length
-    ? `<section>
-        <h3>Community / Dev</h3>
-        ${definitionList(communityRows)}
-      </section>`
-    : "";
   return `<div class="stage-summary fundamental-summary">
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <div class="fundamental-card">
@@ -506,7 +484,6 @@ function fundamentalSummary(stage) {
         <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
         ${bulletList(metrics.movement_type_reasons)}
       </section>
-      ${communitySection}
       <section>
         <h3>Соцтренд</h3>
         ${metrics.lunarcrush_available ? definitionList(socialRows) : ""}

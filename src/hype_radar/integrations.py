@@ -23,8 +23,8 @@ class CoinGeckoClient:
             "localization": "false",
             "tickers": "false",
             "market_data": "true",
-            "community_data": "true",
-            "developer_data": "true",
+            "community_data": "false",
+            "developer_data": "false",
             "sparkline": "false",
         }
         return self.http.get_json(self.base_url + "/coins/" + coin_id, self._params(params))
