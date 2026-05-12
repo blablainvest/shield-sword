@@ -170,6 +170,20 @@ class BybitPublicClient:
             last_timestamp_ms=max(timestamps) if timestamps else None,
         )
 
+    def open_interest(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        limit: int = 24,
+        category: str = "linear",
+    ) -> List[Dict[str, Any]]:
+        result = self._get_result(
+            "/v5/market/open-interest",
+            {"category": category, "symbol": symbol, "intervalTime": interval, "limit": min(max(limit, 1), 200)},
+        )
+        rows = [row for row in (result.get("list") or []) if isinstance(row, dict)]
+        return sorted(rows, key=lambda row: _int_or_none(row.get("timestamp")) or 0)
+
     def orderbook(self, symbol: str, limit: int = 50, category: str = "linear") -> OrderbookStats:
         result = self._get_result(
             "/v5/market/orderbook",

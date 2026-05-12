@@ -9,6 +9,7 @@ const sortState = {
 const stageOrder = [
   "market_scan",
   "initial_selection",
+  "research_charts",
   "fundamentals",
   "social_filter",
   "manipulation_detector",
@@ -386,6 +387,8 @@ function openResearchCard(symbol, runId = "", researchId = "") {
     ${bulletList(card.summary)}
     <h2>Почему движение</h2>
     ${bulletList(card.why_it_moved)}
+    <h2>Social / Price / Volume</h2>
+    ${researchChartsSummary(card.research_charts)}
     <h2>Ссылки</h2>
     <div class="link-list">
       ${Object.entries(card.links || {}).map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`).join("")}
@@ -407,6 +410,7 @@ function openResearchCard(symbol, runId = "", researchId = "") {
 }
 
 function stageSummary(stage, blockingStage = null) {
+  if (stage?.stage === "research_charts") return researchChartsSummary(stage);
   if (stage?.stage === "manipulation_detector") return manipulationSummary(stage);
   if (stage?.metrics?.fundamental_label) return fundamentalSummary(stage);
   if (stage?.stage === "social_filter" || stage?.metrics?.social_label) return socialSummary(stage);
@@ -418,6 +422,68 @@ function stageSummary(stage, blockingStage = null) {
     <p>${escapeHtml(reason || "Этап ещё не запускался.")}</p>
     ${stageMetricList(stage)}
   </div>`;
+}
+
+function researchChartsSummary(stage) {
+  const metrics = stage?.metrics || {};
+  const charts = metrics.charts || {};
+  const scenario = metrics.scenario || {};
+  const oi = metrics.derivatives?.open_interest || {};
+  const rows = [
+    ["Scenario", scenario.label],
+    ["Conclusion", scenario.conclusion],
+    ["Mentions source", `${charts.mentions?.status || "unavailable"} / ${charts.mentions?.source || "lunarcrush"}`],
+    ["Open interest", `${oi.status || "unavailable"}${oi.change_pct !== null && oi.change_pct !== undefined ? `, ${pct(oi.change_pct)}` : ""}`],
+    ["Research time", formatDate(metrics.research_time)]
+  ];
+  return `<div class="stage-summary chart-summary">
+    <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
+    <p>${escapeHtml(stageReason(stage) || scenario.conclusion || "Chart stage has not run yet.")}</p>
+    ${definitionList(rows)}
+    <div class="chart-grid">
+      ${lineChart(charts.mentions, "mentions")}
+      ${lineChart(charts.price_change, "price")}
+      ${lineChart(charts.volume_change, "volume")}
+    </div>
+    <section>
+      <h3>Scenario evidence</h3>
+      ${bulletList(scenario.evidence || [])}
+    </section>
+  </div>`;
+}
+
+function lineChart(chart, kind) {
+  const points = chart?.points || [];
+  const values = points.map((point) => Number(point?.value)).filter(Number.isFinite);
+  const status = chart?.status || "unavailable";
+  if (!points.length || !values.length) {
+    return `<section class="mini-chart ${kind}">
+      <h3>${escapeHtml(chart?.label || kind)}</h3>
+      <div class="chart-empty">${escapeHtml(chart?.reason || status || "No data")}</div>
+    </section>`;
+  }
+  const width = 260;
+  const height = 96;
+  const pad = 10;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const coords = points.map((point, index) => {
+    const value = Number(point?.value);
+    const x = pad + (index * (width - pad * 2)) / Math.max(1, points.length - 1);
+    if (!Number.isFinite(value)) return null;
+    const y = height - pad - ((value - min) / span) * (height - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).filter(Boolean);
+  const latest = points.slice().reverse().find((point) => Number.isFinite(Number(point?.value)))?.value;
+  const latestLabel = chart.unit === "pct" ? pct(latest) : wholeNumber(latest);
+  return `<section class="mini-chart ${kind}">
+    <h3>${escapeHtml(chart.label || kind)} <span>${escapeHtml(latestLabel || "")}</span></h3>
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(chart.label || kind)}">
+      <line x1="${pad}" y1="${height / 2}" x2="${width - pad}" y2="${height / 2}" class="chart-zero"></line>
+      <polyline points="${coords.join(" ")}"></polyline>
+    </svg>
+  </section>`;
 }
 
 function socialSummary(stage) {
@@ -766,6 +832,7 @@ function sortButton(key, label) {
 function pipelineBadgeList(stages) {
   const badgeMap = [
     ["Волатильность", "market_scan"],
+    ["Charts", "research_charts"],
     ["Фундаментал", "fundamentals"],
     ["Соцфильтр", "social_filter"],
     ["Манипуляторы", "manipulation_detector"],
@@ -884,6 +951,7 @@ function statusLabel(status) {
 
 function stageResultLabel(stage) {
   const metrics = stage?.metrics || {};
+  if (metrics.scenario?.label) return metrics.scenario.label;
   if (metrics.fundamental_label) return metrics.fundamental_label;
   if (metrics.social_label) return metrics.social_label;
   return statusLabel(stage?.status || "skipped");
@@ -978,6 +1046,7 @@ function stageLabel(stage) {
   return ({
     market_scan: "Волатильность",
     initial_selection: "Первичный отбор",
+    research_charts: "Social/Price/Volume",
     fundamentals: "Фундаментал",
     social_filter: "Соцфильтр",
     manipulation_detector: "Манипуляторы",

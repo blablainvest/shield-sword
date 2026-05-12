@@ -368,6 +368,7 @@ def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
         "fundamentals": _stage_summary(stages, "fundamentals"),
         "links": _links(payload.get("symbol") or ""),
         "sentiment": _stage_summary(stages, "social_filter"),
+        "research_charts": _stage_summary(stages, "research_charts"),
         "manipulation": _stage_summary(stages, "manipulation_detector"),
         "technical_analysis": {
             "stage": _stage_summary(stages, "technical_analysis"),

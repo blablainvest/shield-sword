@@ -12,6 +12,7 @@ from uuid import uuid4
 from .bybit import BybitPublicClient
 from .filters import is_excluded_base, tradable_symbol
 from .models import Candidate, CvdStats, Instrument, LongShortRatio, PipelineCandidate, PipelineStageResult, ScanRun, Ticker
+from .research_charts import build_research_charts_stage
 from .scoring import MarketSnapshot, score_snapshot
 from .token_intelligence import (
     MppTokenIntelligenceClient,
@@ -395,6 +396,15 @@ class HypeRadarEngine:
         except Exception:
             return None
 
+    def _open_interest_history(self, symbol: str) -> List[Dict[str, object]]:
+        getter = getattr(self.bybit, "open_interest", None)
+        if not getter:
+            return []
+        try:
+            return getter(symbol, interval="1h", limit=24)
+        except Exception:
+            return []
+
     def _volume_change_24h(self, symbol: str) -> Optional[float]:
         return self._volume_change_window(symbol, 24)
 
@@ -547,6 +557,24 @@ class HypeRadarEngine:
         )
         candidate = score_snapshot(snapshot)
         token_data = self._token_intelligence(pipeline)
+        chart_payload = build_research_charts_stage(
+            ticker.symbol,
+            ticker,
+            candles["60"],
+            token_data,
+            self._open_interest_history(ticker.symbol),
+        )
+        pipeline.add_stage(
+            PipelineStageResult(
+                stage="research_charts",
+                status=str(chart_payload["status"]),
+                score=chart_payload["score"],
+                reason=str(chart_payload["reason"]),
+                metrics=chart_payload["metrics"],
+                raw_source=chart_payload["raw_source"],
+                blocking=False,
+            )
+        )
         _add_context_stages(pipeline, candidate, token_data)
         _add_risk_stages(pipeline, candidate, token_data)
         _enforce_rr_stage(pipeline, candidate)
