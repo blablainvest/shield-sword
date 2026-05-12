@@ -362,6 +362,7 @@ def fundamentals_stage_payload(token_data: Optional[Dict[str, Any]], hype_cause:
             "reason": "Фундаментал пропущен: CoinGecko/LunarCrush intelligence не настроен или недоступен.",
             "metrics": {
                 "fundamental_label": "Недостаточно данных",
+                "fundamental_label_reason": "Источники не дали достаточно данных для уверенного фундаментального вывода.",
                 "hype_cause": hype_cause,
                 "circulating_supply_warn_threshold": 0.30,
             },
@@ -374,6 +375,7 @@ def fundamentals_stage_payload(token_data: Optional[Dict[str, Any]], hype_cause:
             "reason": "Фундаментал пропущен: не удалось надежно сопоставить тикер с CoinGecko coin_id.",
             "metrics": {
                 "fundamental_label": "Недостаточно данных",
+                "fundamental_label_reason": "Источники не дали достаточно данных для уверенного фундаментального вывода.",
                 "identity_confidence": identity.get("confidence"),
                 "identity_reason": identity.get("reason"),
                 "circulating_supply_warn_threshold": 0.30,
@@ -387,10 +389,11 @@ def fundamentals_stage_payload(token_data: Optional[Dict[str, Any]], hype_cause:
         + (100.0 - metrics["tokenomics_risk_score"]) * 0.25,
         2,
     )
-    label, status = classify_fundamental(metrics)
+    label, status, label_reason = classify_fundamental(metrics)
     metrics.update(
         {
             "fundamental_label": label,
+            "fundamental_label_reason": label_reason,
             "score_components": {
                 "project_quality_score": metrics["project_quality_score"],
                 "narrative_score": metrics["narrative_score"],
@@ -555,26 +558,31 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     }
 
 
-def classify_fundamental(metrics: Dict[str, Any]) -> tuple[str, str]:
+def classify_fundamental(metrics: Dict[str, Any]) -> tuple[str, str, str]:
     project_score = float(metrics.get("project_quality_score") or 0.0)
     narrative = float(metrics.get("narrative_score") or 0.0)
     tokenomics_risk = float(metrics.get("tokenomics_risk_score") or 0.0)
-    circ_ratio = metrics.get("circulating_supply_ratio")
     volume_to_market_cap = metrics.get("volume_to_market_cap")
-    low_float = circ_ratio is not None and circ_ratio < 0.30
-    speculative_volume = volume_to_market_cap is not None and volume_to_market_cap > 1.0
+    overheated_volume = volume_to_market_cap is not None and volume_to_market_cap > 0.50
+    extreme_tokenomics = tokenomics_risk >= 65
 
     if project_score < 35 and narrative < 45:
-        return "Недостаточно данных", "skipped"
-    if speculative_volume and tokenomics_risk >= 40:
-        return "Спекулятивный памп", "warn"
-    if low_float and narrative >= 75 and project_score >= 55:
-        return "Живой нарратив с риском токеномики", "warn"
-    if low_float or tokenomics_risk >= 65:
-        return "Спекулятивный памп", "warn"
-    if narrative >= 55 and project_score >= 50:
-        return "Живой нарратив", "pass"
-    return "Слабая база", "warn"
+        return (
+            "Недостаточно данных",
+            "skipped",
+            "Источники не дали достаточно данных для уверенного фундаментального вывода.",
+        )
+    if narrative >= 55 and project_score >= 50 and not overheated_volume and not extreme_tokenomics:
+        return (
+            "Нарратив подтвержден",
+            "pass",
+            "Есть достаточное совпадение описания проекта, категории/экосистемы и рыночного или социального нарратива.",
+        )
+    return (
+        "Спекулятивный риск",
+        "warn",
+        "Движение требует осторожности: слабое подтверждение, перегрев объема или риск токеномики.",
+    )
 
 
 def fdv_tier(fdv: Optional[float]) -> Dict[str, str]:

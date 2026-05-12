@@ -529,6 +529,7 @@ function fundamentalSummary(stage) {
       <section>
         <h3>Почему могло двигаться</h3>
         <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
+        ${metrics.fundamental_label_reason ? `<p>${escapeHtml(metrics.fundamental_label_reason)}</p>` : ""}
         ${bulletList(metrics.movement_type_reasons)}
       </section>
     </div>

@@ -9,6 +9,7 @@ from hype_radar.storage import RadarStore, _summary, _why_it_moved, lifecycle_la
 from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
+    classify_fundamental,
     fdv_tier,
     fundamentals_stage_payload,
     market_cap_to_fdv_profile,
@@ -300,7 +301,8 @@ class PipelineTests(unittest.TestCase):
 
         fundamentals = [stage for stage in researched.stages if stage.stage == "fundamentals"][0]
         self.assertEqual(fundamentals.status, "warn")
-        self.assertEqual(fundamentals.metrics["fundamental_label"], "Слабая база")
+        self.assertEqual(fundamentals.metrics["fundamental_label"], "Спекулятивный риск")
+        self.assertIn("осторожности", fundamentals.metrics["fundamental_label_reason"])
         self.assertEqual(fundamentals.metrics["data_coverage"], "coingecko_only")
         self.assertIn("trend_label", fundamentals.metrics)
         self.assertEqual(fundamentals.metrics["fdv_tier"], "mid")
@@ -368,6 +370,26 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(_manipulation_status(82), "warn")
         self.assertEqual(_manipulation_status(83), "fail")
 
+    def test_fundamental_two_label_scale(self):
+        strong = {
+            "project_quality_score": 70,
+            "narrative_score": 75,
+            "tokenomics_risk_score": 35,
+            "circulating_supply_ratio": 0.20,
+            "volume_to_market_cap": 0.20,
+        }
+        overheated = {**strong, "volume_to_market_cap": 1.10}
+        tokenomics = {**strong, "tokenomics_risk_score": 70}
+        weak = {**strong, "project_quality_score": 45, "narrative_score": 50}
+        missing = {**strong, "project_quality_score": 20, "narrative_score": 20}
+
+        self.assertEqual(classify_fundamental(strong)[0], "Нарратив подтвержден")
+        self.assertEqual(classify_fundamental(strong)[1], "pass")
+        self.assertEqual(classify_fundamental(overheated)[0], "Спекулятивный риск")
+        self.assertEqual(classify_fundamental(tokenomics)[0], "Спекулятивный риск")
+        self.assertEqual(classify_fundamental(weak)[0], "Спекулятивный риск")
+        self.assertEqual(classify_fundamental(missing)[0], "Недостаточно данных")
+
     def test_coingecko_search_is_cached_and_global_feeds_are_not_called(self):
         fake = RecordingCoinGecko()
         client = MppTokenIntelligenceClient()
@@ -399,7 +421,7 @@ class PipelineTests(unittest.TestCase):
         manipulation = [stage for stage in researched.stages if stage.stage == "manipulation_detector"][0]
 
         self.assertEqual(fundamentals.status, "warn")
-        self.assertEqual(fundamentals.metrics["fundamental_label"], "Спекулятивный памп")
+        self.assertEqual(fundamentals.metrics["fundamental_label"], "Спекулятивный риск")
         self.assertLess(fundamentals.metrics["circulating_supply_ratio"], 0.30)
         self.assertEqual(fundamentals.metrics["tokenomics_risk_level"], "высокий")
         self.assertFalse(any(stage.stage == "blacklist_screen" for stage in researched.stages))
@@ -419,8 +441,8 @@ class PipelineTests(unittest.TestCase):
         fundamentals = fundamentals_stage_payload(payload, ["market_anomaly", "volume_spike"])
 
         self.assertEqual(fundamentals["status"], "warn")
-        self.assertNotEqual(fundamentals["metrics"]["fundamental_label"], "Живой нарратив")
-        self.assertEqual(fundamentals["metrics"]["fundamental_label"], "Спекулятивный памп")
+        self.assertNotEqual(fundamentals["metrics"]["fundamental_label"], "Нарратив подтвержден")
+        self.assertEqual(fundamentals["metrics"]["fundamental_label"], "Спекулятивный риск")
         self.assertGreater(fundamentals["metrics"]["volume_to_market_cap"], 1.0)
         self.assertTrue(any("Vol/MC" in flag for flag in fundamentals["metrics"]["red_flags"]))
         self.assertTrue(any("Циркуляция" in flag for flag in fundamentals["metrics"]["red_flags"]))
