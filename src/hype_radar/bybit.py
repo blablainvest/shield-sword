@@ -4,7 +4,7 @@ import os
 from typing import Any, Dict, Iterable, List, Optional
 
 from .http import JsonHttpClient
-from .models import Candle, Instrument, LongShortRatio, OrderbookStats, Ticker
+from .models import Candle, CvdStats, Instrument, LongShortRatio, OrderbookStats, Ticker, TradePrint
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -134,6 +134,41 @@ class BybitPublicClient:
             if len(row) >= 7
         ]
         return sorted(candles, key=lambda candle: candle.start_ms)
+
+    def recent_trades(self, symbol: str, limit: int = 1000, category: str = "linear") -> List[TradePrint]:
+        result = self._get_result(
+            "/v5/market/recent-trade",
+            {"category": category, "symbol": symbol, "limit": min(max(limit, 1), 1000)},
+        )
+        trades = [
+            TradePrint(
+                symbol=str(row.get("symbol") or symbol),
+                side=str(row.get("side") or ""),
+                price=_float(row.get("price")),
+                size=_float(row.get("size")),
+                timestamp_ms=_int_or_none(row.get("time")),
+            )
+            for row in (result.get("list") or [])
+            if isinstance(row, dict)
+        ]
+        return sorted(trades, key=lambda trade: trade.timestamp_ms or 0)
+
+    def recent_trade_cvd(self, symbol: str, limit: int = 1000, category: str = "linear") -> Optional[CvdStats]:
+        trades = self.recent_trades(symbol, limit=limit, category=category)
+        if not trades:
+            return None
+        buy_volume = sum(trade.size for trade in trades if trade.side.lower() == "buy")
+        sell_volume = sum(trade.size for trade in trades if trade.side.lower() == "sell")
+        timestamps = [trade.timestamp_ms for trade in trades if trade.timestamp_ms is not None]
+        return CvdStats(
+            symbol=symbol,
+            cvd_base=buy_volume - sell_volume,
+            buy_volume_base=buy_volume,
+            sell_volume_base=sell_volume,
+            trade_count=len(trades),
+            first_timestamp_ms=min(timestamps) if timestamps else None,
+            last_timestamp_ms=max(timestamps) if timestamps else None,
+        )
 
     def orderbook(self, symbol: str, limit: int = 50, category: str = "linear") -> OrderbookStats:
         result = self._get_result(

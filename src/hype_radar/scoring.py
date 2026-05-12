@@ -19,7 +19,7 @@ from .indicators import (
     vwap,
     zscore,
 )
-from .models import Candidate, Candle, FeatureSet, LongShortRatio, OrderbookStats, ScoreBreakdown, Ticker, TradePlan
+from .models import Candidate, Candle, CvdStats, FeatureSet, LongShortRatio, OrderbookStats, ScoreBreakdown, Ticker, TradePlan
 
 
 @dataclass
@@ -29,6 +29,7 @@ class MarketSnapshot:
     candles: Dict[str, Sequence[Candle]]
     alt_market_return_1h: float = 0.0
     long_short_ratio: Optional[LongShortRatio] = None
+    cvd: Optional[CvdStats] = None
 
 
 def build_features(snapshot: MarketSnapshot) -> FeatureSet:
@@ -137,7 +138,7 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
     trade_plan = make_trade_plan(direction_bias, verdict, snapshot, features)
     hype_cause = infer_hype_causes(features, manipulation)
     strategy_identifier = select_strategy_identifier(ticker, features, technical_analysis, direction_bias, verdict, snapshot.long_short_ratio)
-    technical_analysis = enrich_strategy_context(technical_analysis, ticker, snapshot.long_short_ratio, strategy_identifier, trade_plan)
+    technical_analysis = enrich_strategy_context(technical_analysis, ticker, snapshot.long_short_ratio, snapshot.cvd, strategy_identifier, trade_plan)
 
     return Candidate(
         symbol=ticker.symbol,
@@ -181,7 +182,7 @@ def build_technical_analysis(candles: Dict[str, Sequence[Candle]]) -> Dict[str, 
     status = "available" if available >= 4 else "partial" if available else "insufficient_data"
     return {
         "status": status,
-        "principle": "onchain_metrics_define_what_to_trade;technical_analysis_defines_when_and_where",
+        "principle": "derivatives_and_market_metrics_define_what_to_trade;technical_analysis_defines_when_and_where",
         "timeframes": {"primary": "60", "breakout": "D"},
         "signals": signals,
     }
@@ -233,6 +234,7 @@ def enrich_strategy_context(
     technical_analysis: Dict[str, object],
     ticker: Ticker,
     long_short_ratio: Optional[LongShortRatio],
+    cvd: Optional[CvdStats],
     strategy_identifier: str,
     trade_plan: TradePlan,
 ) -> Dict[str, object]:
@@ -240,11 +242,11 @@ def enrich_strategy_context(
     long_ratio = long_short_ratio.long_ratio if long_short_ratio else None
     short_ratio = long_short_ratio.short_ratio if long_short_ratio else None
     long_short_available = long_ratio is not None and short_ratio is not None
-    derivatives_status = "available" if long_short_available else "partial"
-    oi_market_cap_status = "unavailable"
-    enriched["onchain_filter"] = {
+    cvd_available = cvd is not None and cvd.trade_count > 0
+    derivatives_status = "available" if long_short_available and cvd_available else "partial"
+    enriched["derivatives_filter"] = {
         "status": derivatives_status,
-        "principle": "derivatives_and_onchain_metrics_define_what_to_trade",
+        "principle": "bybit_derivatives_metrics_define_what_to_trade",
         "metrics": {
             "funding_rate": ticker.funding_rate,
             "open_interest": ticker.open_interest,
@@ -253,9 +255,7 @@ def enrich_strategy_context(
             "short_ratio": short_ratio,
             "long_short_ratio_status": "available" if long_short_available else "unavailable",
             "long_short_timestamp_ms": long_short_ratio.timestamp_ms if long_short_ratio else None,
-            "cvd": {"status": "unavailable", "reason": "Bybit public OHLCV/ticker feed does not expose CVD in this pipeline yet."},
-            "liquidation_clusters": {"status": "unavailable", "reason": "Liquidation heatmap source is not configured yet."},
-            "oi_market_cap_ratio": {"status": oi_market_cap_status, "reason": "Market cap is provided by token intelligence stage, not by score_snapshot."},
+            "cvd": _cvd_payload(cvd),
         },
     }
     enriched["strategy_identifier"] = strategy_identifier
@@ -271,7 +271,7 @@ def enrich_strategy_context(
         ],
     }
     enriched["execution_context"] = {
-        "entry_basis": "TA confirmation signals define when/where to enter; do not use onchain/derivatives alone as an entry trigger.",
+        "entry_basis": "TA confirmation signals define when/where to enter; do not use derivatives metrics alone as an entry trigger.",
         "stop_loss_basis": "ATR/recent structure from trade_plan.stop_loss and trade_plan.invalidation.",
         "take_profit_basis": "Structure/liquidity-based targets approximated by trade_plan.take_profit_1/2/3.",
         "trade_plan": trade_plan.to_dict() if hasattr(trade_plan, "to_dict") else {
@@ -287,6 +287,25 @@ def enrich_strategy_context(
         },
     }
     return enriched
+
+
+def _cvd_payload(cvd: Optional[CvdStats]) -> Dict[str, object]:
+    if cvd is None or cvd.trade_count <= 0:
+        return {
+            "status": "unavailable",
+            "source": "bybit_recent_trade",
+            "reason": "Bybit does not expose a ready-made historical CVD metric here; the pipeline computes recent-trade CVD when public recent trades are available.",
+        }
+    return {
+        "status": "available",
+        "source": "bybit_recent_trade",
+        "cvd_base": cvd.cvd_base,
+        "buy_volume_base": cvd.buy_volume_base,
+        "sell_volume_base": cvd.sell_volume_base,
+        "trade_count": cvd.trade_count,
+        "first_timestamp_ms": cvd.first_timestamp_ms,
+        "last_timestamp_ms": cvd.last_timestamp_ms,
+    }
 
 
 def _signal_value(signals: Dict[str, object], name: str) -> object:

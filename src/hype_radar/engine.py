@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from .bybit import BybitPublicClient
 from .filters import tradable_symbol
-from .models import Candidate, Instrument, LongShortRatio, PipelineCandidate, PipelineStageResult, ScanRun, Ticker
+from .models import Candidate, CvdStats, Instrument, LongShortRatio, PipelineCandidate, PipelineStageResult, ScanRun, Ticker
 from .scoring import MarketSnapshot, score_snapshot
 from .token_intelligence import (
     MppTokenIntelligenceClient,
@@ -399,6 +399,15 @@ class HypeRadarEngine:
         except Exception:
             return None
 
+    def _recent_trade_cvd(self, symbol: str) -> Optional[CvdStats]:
+        getter = getattr(self.bybit, "recent_trade_cvd", None)
+        if not getter:
+            return None
+        try:
+            return getter(symbol, limit=1000)
+        except Exception:
+            return None
+
     def _volume_change_24h(self, symbol: str) -> Optional[float]:
         return self._volume_change_window(symbol, 24)
 
@@ -539,7 +548,16 @@ class HypeRadarEngine:
             return None
         orderbook = self.bybit.orderbook(ticker.symbol, limit=50)
         pipeline.add_raw("bybit.orderbook_stats", asdict(orderbook))
-        snapshot = MarketSnapshot(ticker=ticker, orderbook=orderbook, candles=candles, alt_market_return_1h=alt_market_return, long_short_ratio=long_short_ratio)
+        cvd = self._recent_trade_cvd(ticker.symbol)
+        pipeline.add_raw("bybit.recent_trade_cvd", asdict(cvd) if cvd else {"status": "unavailable"})
+        snapshot = MarketSnapshot(
+            ticker=ticker,
+            orderbook=orderbook,
+            candles=candles,
+            alt_market_return_1h=alt_market_return,
+            long_short_ratio=long_short_ratio,
+            cvd=cvd,
+        )
         candidate = score_snapshot(snapshot)
         token_data = self._token_intelligence(pipeline)
         _add_context_stages(pipeline, candidate, token_data)

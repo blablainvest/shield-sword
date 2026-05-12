@@ -407,27 +407,27 @@ function technicalAnalysisSummary(technicalAnalysis, fallbackStrategy) {
     name,
     `${signal?.status || "нет данных"}: ${signal?.value === null || signal?.value === undefined ? "—" : signal.value}`
   ]);
-  const onchain = metrics.onchain_filter?.metrics || {};
+  const derivatives = metrics.derivatives_filter?.metrics || {};
+  const cvd = derivatives.cvd || {};
   const derivativeRows = [
-    ["Status", metrics.onchain_filter?.status || "unavailable"],
-    ["Funding", pct(onchain.funding_rate) || "—"],
-    ["Open Interest", money(onchain.open_interest_value) || metricNumber(onchain.open_interest)],
-    ["Long / Short", longShort(onchain.long_ratio, onchain.short_ratio)],
-    ["L/S source", onchain.long_short_ratio_status || "unavailable"],
-    ["CVD", onchain.cvd?.status || "unavailable"],
-    ["Liquidation clusters", onchain.liquidation_clusters?.status || "unavailable"],
-    ["OI / Market Cap", onchain.oi_market_cap_ratio?.status || "unavailable"]
+    ["Status", metrics.derivatives_filter?.status || "unavailable"],
+    ["Funding", pct(derivatives.funding_rate) || "—"],
+    ["Open Interest", money(derivatives.open_interest_value) || metricNumber(derivatives.open_interest)],
+    ["Long / Short", longShort(derivatives.long_ratio, derivatives.short_ratio)],
+    ["L/S source", derivatives.long_short_ratio_status || "unavailable"],
+    ["CVD", cvd.status === "available" ? metricNumber(cvd.cvd_base) : (cvd.status || "unavailable")],
+    ["CVD source", cvd.source || "bybit_recent_trade"]
   ];
   const execution = metrics.execution_context || {};
   return `<div class="stage-summary technical-summary">
     <span class="badge ${stage.status || "skipped"}">${stageResultLabel(stage)}</span>
-    <p>${escapeHtml(metrics.principle || "Onchain/derivatives определяют что торговать; ТА определяет когда и где входить.")}</p>
+    <p>${escapeHtml(metrics.principle || "Derivatives/market metrics определяют что торговать; ТА определяет когда и где входить.")}</p>
     <section>
       <h3>Идентификатор стратегии</h3>
       <p><strong>${escapeHtml(metrics.strategy_identifier || metrics.strategy_models?.selected || fallbackStrategy || "unknown")}</strong></p>
     </section>
     <section>
-      <h3>Onchain / derivatives filter</h3>
+      <h3>Derivatives filter</h3>
       ${definitionList(derivativeRows)}
     </section>
     <section>

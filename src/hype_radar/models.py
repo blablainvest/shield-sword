@@ -38,6 +38,26 @@ class LongShortRatio:
 
 
 @dataclass(frozen=True)
+class TradePrint:
+    symbol: str
+    side: str
+    price: float
+    size: float
+    timestamp_ms: Optional[int]
+
+
+@dataclass(frozen=True)
+class CvdStats:
+    symbol: str
+    cvd_base: float
+    buy_volume_base: float
+    sell_volume_base: float
+    trade_count: int
+    first_timestamp_ms: Optional[int]
+    last_timestamp_ms: Optional[int]
+
+
+@dataclass(frozen=True)
 class Instrument:
     symbol: str
     base_coin: str
