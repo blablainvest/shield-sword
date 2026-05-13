@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -52,6 +53,9 @@ class RadarRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/research/run":
             self._handle_research_run(parse_qs(parsed.query))
+            return
+        if parsed.path == "/api/search/run":
+            self._handle_search_run(parse_qs(parsed.query))
             return
         self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
@@ -130,6 +134,28 @@ class RadarRequestHandler(BaseHTTPRequestHandler):
         if not symbol:
             self._json({"error": "Missing symbol."}, HTTPStatus.BAD_REQUEST)
             return
+        try:
+            symbol = normalize_symbol_from_query(symbol)
+        except ValueError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        card = self._run_symbol_research(symbol, query)
+        self._json(card)
+
+    def _handle_search_run(self, query: Dict[str, Any]) -> None:
+        value = _optional_first(query, "query") or _optional_first(query, "input") or _optional_first(query, "url")
+        if not value:
+            self._json({"error": "Missing query."}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            symbol = normalize_symbol_from_query(value)
+        except ValueError as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        card = self._run_symbol_research(symbol, query)
+        self._json(card)
+
+    def _run_symbol_research(self, symbol: str, query: Dict[str, Any]) -> Dict[str, Any]:
         config = ScanConfig(
             top=1,
             max_symbols=1,
@@ -140,7 +166,7 @@ class RadarRequestHandler(BaseHTTPRequestHandler):
         candidate = self.server_owner.engine.research_symbol(symbol, config)
         run_id = self.server_owner.store.latest_run_id() or "manual"
         card = self.server_owner.store.save_research(run_id, candidate)
-        self._json(card)
+        return card
 
     def _serve_static(self, path: str) -> None:
         static_root = Path(__file__).parent / "web"
@@ -202,6 +228,62 @@ def _optional_int_query(query: Dict[str, Any], key: str) -> Optional[int]:
 
 def _volume_query(query: Dict[str, Any]) -> float:
     return float(_first(query, "min_volume", _first(query, "min_turnover", "2000000")))
+
+
+def normalize_symbol_from_query(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Empty symbol or Bybit URL.")
+
+    parsed = urlparse(text)
+    token = ""
+    if parsed.scheme or parsed.netloc:
+        token = _symbol_from_bybit_url(parsed)
+    else:
+        token = text
+
+    symbol = _normalize_symbol_token(token)
+    if not symbol:
+        raise ValueError("Invalid symbol. Use a Bybit linear USDT ticker like BTCUSDT or BTC.")
+    return symbol
+
+
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,30}$")
+_KNOWN_NON_USDT_QUOTES = ("USDC", "USD", "EUR", "TRY")
+
+
+def _symbol_from_bybit_url(parsed: Any) -> str:
+    host = parsed.netloc.lower()
+    if host and host != "bybit.com" and not host.endswith(".bybit.com"):
+        raise ValueError("Only Bybit trade URLs are supported.")
+
+    candidates = []
+    parts = [unquote(part).strip() for part in parsed.path.split("/") if part.strip()]
+    lowered = [part.lower() for part in parts]
+    for index, part in enumerate(lowered[:-1]):
+        if part == "usdt":
+            candidates.append(parts[index + 1])
+    candidates.extend(part for part in parts if part.upper().endswith("USDT"))
+    query = parse_qs(parsed.query)
+    for key in ("symbol", "contract", "pair"):
+        candidates.extend(query.get(key, []))
+
+    for candidate in candidates:
+        normalized = _normalize_symbol_token(candidate)
+        if normalized:
+            return normalized
+    raise ValueError("Could not find a USDT symbol in the Bybit URL.")
+
+
+def _normalize_symbol_token(value: str) -> str:
+    token = str(value or "").strip().upper()
+    if not _SYMBOL_RE.fullmatch(token):
+        return ""
+    if token.endswith("USDT"):
+        return token if len(token) > 4 else ""
+    if token.endswith(_KNOWN_NON_USDT_QUOTES):
+        return ""
+    return f"{token}USDT"
 
 
 def serve(host: str = "127.0.0.1", port: int = 8765, store_path: str = "data/hype_radar.sqlite3") -> None:

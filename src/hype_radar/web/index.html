@@ -16,6 +16,7 @@
         <div class="nav-section">
           <div class="nav-section-title">Щит</div>
           <button class="nav-item active" data-view="live">Сканер</button>
+          <button class="nav-item" data-view="search">Поиск</button>
           <button class="nav-item" data-view="pipeline">Пайплайн</button>
           <button class="nav-item" data-view="backtests">Бэктесты</button>
         </div>
@@ -77,6 +78,29 @@
               <div class="table-wrap"><table id="topShort"></table></div>
             </section>
           </div>
+        </section>
+
+        <section class="view" id="view-search">
+          <form class="search-toolbar" id="searchForm">
+            <label title="Тикер или ссылка Bybit linear USDT. Например BTC, BTCUSDT или https://www.bybit.com/trade/usdt/BTCUSDT.">Монета
+              <input id="searchInput" type="search" placeholder="BTCUSDT или Bybit URL" autocomplete="off" />
+            </label>
+            <label title="Период изменения цены и объема для ручного исследования.">Период
+              <select id="searchWindow">
+                <option value="1">1ч</option>
+                <option value="2">2ч</option>
+                <option value="3">3ч</option>
+                <option value="4">4ч</option>
+                <option value="6">6ч</option>
+                <option value="8">8ч</option>
+                <option value="12">12ч</option>
+                <option value="24" selected>24ч</option>
+              </select>
+            </label>
+            <button id="runSearch" type="submit">Найти</button>
+          </form>
+          <div id="searchState" class="search-state"></div>
+          <div id="searchResult"></div>
         </section>
 
         <section class="view" id="view-pipeline">

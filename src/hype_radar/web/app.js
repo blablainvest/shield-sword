@@ -1,5 +1,7 @@
 let currentReport = null;
 let researchCards = [];
+let searchResultCard = null;
+let searchStatus = { state: "idle", message: "" };
 let selectedView = "live";
 const sortState = {
   topLong: { key: "price_change_pct", direction: "desc" },
@@ -28,6 +30,7 @@ document.querySelectorAll(".nav-item").forEach((button) => {
 document.getElementById("runScan").addEventListener("click", runScan);
 document.getElementById("scanWindow").addEventListener("change", render);
 document.getElementById("closeDrawer").addEventListener("click", () => document.getElementById("drawer").classList.remove("open"));
+document.getElementById("searchForm").addEventListener("submit", runSearch);
 document.getElementById("pipelineSearch").addEventListener("input", renderPipelineBoard);
 document.getElementById("backtestSearch").addEventListener("input", renderBacktestTable);
 document.getElementById("backtestSetupFilter").addEventListener("change", renderBacktestTable);
@@ -97,6 +100,40 @@ async function runResearch(symbol, button) {
   }
 }
 
+async function runSearch(event) {
+  event.preventDefault();
+  const input = document.getElementById("searchInput").value.trim();
+  const button = document.getElementById("runSearch");
+  if (!input) {
+    searchStatus = { state: "error", message: "Введите тикер или ссылку Bybit." };
+    renderSearchResult();
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Ищем...";
+  searchStatus = { state: "loading", message: "Запускаем реальный research pipeline." };
+  renderSearchResult();
+  const minVolume = minVolumeUsdt();
+  const windowHours = searchWindowHours();
+  try {
+    const response = await fetch(`/api/search/run?query=${encodeURIComponent(input)}&min_volume=${minVolume}&window_hours=${windowHours}`, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Не удалось запустить анализ.");
+    }
+    searchResultCard = payload;
+    researchCards = sortResearchCards([payload, ...researchCards]);
+    searchStatus = { state: "ready", message: "" };
+    render();
+  } catch (error) {
+    searchStatus = { state: "error", message: error.message || "Не удалось запустить анализ." };
+    renderSearchResult();
+  } finally {
+    button.disabled = false;
+    button.textContent = "Найти";
+  }
+}
+
 function render() {
   updatePageChrome();
   if (currentReport) {
@@ -116,6 +153,7 @@ function render() {
     renderMoverTable("topLong", topRows, hours);
     renderMoverTable("topShort", bottomRows, hours);
   }
+  renderSearchResult();
   renderPipelineBoard();
   renderBacktestTable();
 }
@@ -127,6 +165,11 @@ function minVolumeUsdt() {
 
 function scanWindowHours() {
   const value = Number(document.getElementById("scanWindow")?.value || 24);
+  return Math.min(24, Math.max(1, Math.round(value)));
+}
+
+function searchWindowHours() {
+  const value = Number(document.getElementById("searchWindow")?.value || scanWindowHours());
   return Math.min(24, Math.max(1, Math.round(value)));
 }
 
@@ -248,6 +291,113 @@ function renderBacktestTable() {
   document.querySelectorAll("#backtestTable tbody tr[data-symbol]").forEach((row) => {
     row.addEventListener("click", () => openResearchCard(row.dataset.symbol, row.dataset.runId, row.dataset.researchId));
   });
+}
+
+function renderSearchResult() {
+  const stateTarget = document.getElementById("searchState");
+  const resultTarget = document.getElementById("searchResult");
+  if (!stateTarget || !resultTarget) return;
+  stateTarget.innerHTML = searchStatus.message
+    ? `<div class="search-message ${searchStatus.state}">${escapeHtml(searchStatus.message)}</div>`
+    : "";
+  if (searchStatus.state === "loading") {
+    resultTarget.innerHTML = "";
+    return;
+  }
+  if (!searchResultCard) {
+    resultTarget.innerHTML = `<div class="soon">
+      <h2>Поиск конкретной монеты</h2>
+      <p>Введите тикер или Bybit URL. Анализ сохранится в истории исследований.</p>
+    </div>`;
+    return;
+  }
+  resultTarget.innerHTML = searchResearchCardHtml(searchResultCard);
+  document.querySelectorAll("#searchResult [data-open-research]").forEach((button) => {
+    button.addEventListener("click", () => openResearchCard(searchResultCard.symbol, searchResultCard.run_id, searchResultCard.research_id));
+  });
+}
+
+function searchResearchCardHtml(card) {
+  const final = card.pipeline?.candidate || {};
+  const setup = card.setup || {};
+  const metrics = searchQuickMetrics(card);
+  const blockingStage = (card.pipeline?.stages || []).find((stage) => stage?.blocking || stage?.status === "fail" || stage?.status === "error");
+  const verdict = card.final_verdict || final.verdict || "SKIPPED";
+  return `<article class="search-result-card">
+    <section class="search-hero">
+      <div>
+        <time>${formatDate(card.created_at)}</time>
+        <h2>${escapeHtml(card.symbol || "")}</h2>
+        <p>${escapeHtml(final.reason_summary || setup.reason || "Пайплайн завершен без итогового резюме.")}</p>
+      </div>
+      <div class="search-hero-side">
+        <span class="verdict-badge">${escapeHtml(verdict)}</span>
+        <dl>
+          <div><dt>Стратегия</dt><dd>${escapeHtml(card.strategy_identifier || final.strategy_identifier || "unknown")}</dd></div>
+          <div><dt>Direction</dt><dd>${escapeHtml(final.direction_bias || "unavailable")}</dd></div>
+          <div><dt>Confidence</dt><dd>${scoreValue(final.confidence)}</dd></div>
+        </dl>
+        <button type="button" data-open-research>Полная карточка</button>
+      </div>
+    </section>
+    <section class="quick-metrics">
+      ${quickMetric("Изм. цены", pct(metrics.price_change_pct), `${metrics.window_hours}ч`, metrics.price_change_pct)}
+      ${quickMetric("Изм. объема", pct(metrics.volume_change_pct), `${metrics.window_hours}ч`, metrics.volume_change_pct)}
+      ${quickMetric("Turnover 24ч", money(metrics.turnover_24h), "Bybit", metrics.turnover_24h)}
+      ${quickMetric("Funding", pct(metrics.funding_rate), "perp", metrics.funding_rate)}
+      ${quickMetric("Open Interest", money(metrics.open_interest_value) || metricNumber(metrics.open_interest), "Bybit", metrics.open_interest_value ?? metrics.open_interest)}
+      ${quickMetric("Long / Short", longShort(metrics.long_ratio, metrics.short_ratio), metrics.long_short_status || "ratio", metrics.long_ratio ?? metrics.short_ratio)}
+    </section>
+    <section class="search-section-grid">
+      <article>
+        <h2>Фундаментал</h2>
+        ${stageSummary(card.fundamentals, blockingStage)}
+      </article>
+      <article>
+        <h2>Социальный анализ</h2>
+        ${stageSummary(card.sentiment, blockingStage)}
+      </article>
+      <article>
+        <h2>ТА</h2>
+        ${technicalAnalysisSummary(card.technical_analysis, card.strategy_identifier || final.strategy_identifier)}
+      </article>
+      <article>
+        <h2>Резюме / вердикт</h2>
+        <div class="stage-summary">
+          <span class="badge ${card.failed_stage ? "warn" : "pass"}">${escapeHtml(verdict)}</span>
+          ${bulletList(card.summary)}
+          ${setup.reason ? `<p>${escapeHtml(setup.reason)}</p>` : ""}
+          ${card.failed_stage ? `<p>Остановлено на этапе: ${escapeHtml(stageLabel(card.failed_stage))}.</p>` : ""}
+        </div>
+      </article>
+    </section>
+  </article>`;
+}
+
+function searchQuickMetrics(card) {
+  const pipelineMetrics = marketMetrics(card.pipeline || {});
+  const derivatives = card.technical_analysis?.metrics?.derivatives_filter?.metrics || {};
+  return {
+    window_hours: pipelineMetrics.scan_window_hours || searchWindowHours(),
+    price_change_pct: pipelineMetrics.price_change_pct,
+    volume_change_pct: pipelineMetrics.volume_change_pct,
+    turnover_24h: pipelineMetrics.turnover_24h ?? card.pipeline?.candidate?.turnover_24h,
+    funding_rate: pipelineMetrics.funding_rate ?? derivatives.funding_rate,
+    open_interest: pipelineMetrics.open_interest ?? derivatives.open_interest,
+    open_interest_value: pipelineMetrics.open_interest_value ?? derivatives.open_interest_value,
+    long_ratio: pipelineMetrics.long_ratio ?? derivatives.long_ratio,
+    short_ratio: pipelineMetrics.short_ratio ?? derivatives.short_ratio,
+    long_short_status: derivatives.long_short_ratio_status
+  };
+}
+
+function quickMetric(label, value, note, rawValue) {
+  const available = rawValue !== null && rawValue !== undefined && rawValue !== "" && value && value !== "н/д";
+  return `<div class="quick-card ${available ? "" : "unavailable"}">
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(available ? value : "unavailable")}</strong>
+    <em>${escapeHtml(available ? note : "Нет данных в ответе источника")}</em>
+  </div>`;
 }
 
 function backtestTableHead() {
@@ -785,6 +935,7 @@ function marketMetrics(item) {
     volume_change_pct: selection.volume_change_window_pct ?? volumeChange24h,
     price_24h_pct: price24h,
     volume_change_24h_pct: volumeChange24h,
+    turnover_24h: selection.turnover_24h ?? market.turnover_24h ?? rawTicker.turnover_24h,
     funding_rate: selection.funding_rate ?? market.funding_rate ?? rawTicker.funding_rate,
     open_interest: selection.open_interest ?? market.open_interest ?? rawTicker.open_interest,
     open_interest_value: selection.open_interest_value ?? market.open_interest_value ?? rawTicker.open_interest_value,
@@ -864,6 +1015,7 @@ function activateView(viewName) {
 function updatePageChrome() {
   const titles = {
     live: "Сканер",
+    search: "Поиск",
     pipeline: "Пайплайн",
     backtests: "Бэктесты"
   };
