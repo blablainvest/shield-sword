@@ -346,6 +346,13 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(_preferred_side(final, fundamentals, research_charts, derivatives), "short")
 
+    def test_preferred_side_does_not_chase_fake_pump_against_negative_cvd(self):
+        final = {"direction_bias": "LONG", "verdict": "WATCH_ONLY", "long_score": 55, "short_score": 50}
+        research_charts = {"metrics": {"scenario": {"code": "fake_pump"}}}
+        derivatives = {"cvd_bias": "negative"}
+
+        self.assertEqual(_preferred_side(final, {"metrics": {}}, research_charts, derivatives), "short")
+
     def test_preferred_side_is_neutral_without_edge(self):
         final = {"direction_bias": "LONG", "verdict": "WATCH_ONLY", "long_score": 50, "short_score": 51}
 

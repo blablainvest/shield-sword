@@ -552,16 +552,16 @@ def _preferred_side(
 ) -> str:
     long_score = _number(final.get("long_score"))
     short_score = _number(final.get("short_score"))
-    if long_score is not None and short_score is not None and abs(short_score - long_score) >= 3.0:
-        return "short" if short_score > long_score else "long"
-
     scenario = (((research_charts or {}).get("metrics") or {}).get("scenario") or {}).get("code")
     has_fundamental_risk = bool(_fundamental_hard_blockers(((fundamentals or {}).get("metrics") or {})))
     cvd_bias = (derivatives or {}).get("cvd_bias")
-    if has_fundamental_risk and scenario in {"fake_pump", "exhaustion_late_hype", "insider_pump"} and cvd_bias == "negative":
-        return "short"
+    if scenario in {"fake_pump", "exhaustion_late_hype", "insider_pump"} and cvd_bias == "negative":
+        if has_fundamental_risk or long_score is None or short_score is None or long_score - short_score <= 8.0:
+            return "short"
     if scenario in {"narrative", "early_narrative"} and cvd_bias == "positive" and not has_fundamental_risk:
         return "long"
+    if long_score is not None and short_score is not None and abs(short_score - long_score) >= 3.0:
+        return "short" if short_score > long_score else "long"
 
     direction = str(final.get("direction_bias") or "").upper()
     verdict = str(final.get("verdict") or "").upper()
