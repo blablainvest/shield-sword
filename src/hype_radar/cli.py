@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--top", type=int, default=5, help="Number of symbols per bucket")
     scan.add_argument("--max-symbols", type=int, default=40, help="Number of prefiltered symbols to enrich")
     scan.add_argument("--min-volume", "--min-turnover", dest="min_volume_24h", type=float, default=2_000_000.0, help="Minimum 24h traded volume in USDT")
+    scan.add_argument("--window-hours", type=int, default=24, help="Price/volume change window in hours (1-24)")
     scan.add_argument("--workers", type=int, default=8, help="Parallel symbol workers")
     scan.add_argument("--format", choices=["json", "text"], default="json", help="Output format")
     scan.add_argument("--output", help="Optional path for JSON report")
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Iterable[str] = None) -> int:
     load_dotenv_file()
+    load_dotenv_file("/root/.hermes/.env")
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command == "serve":
@@ -46,6 +48,7 @@ def main(argv: Iterable[str] = None) -> int:
         top=args.top,
         max_symbols=args.max_symbols,
         min_turnover_24h=args.min_volume_24h,
+        window_hours=args.window_hours,
         workers=args.workers,
     )
     report = HypeRadarEngine().scan(config)
@@ -76,6 +79,7 @@ def load_dotenv_file(path: str = ".env") -> None:
 
 
 def print_text_report(report: ScanReport) -> None:
+    window_hours = int(report.run.config.get("window_hours") or 24)
     print("Bybit Altcoin Hype Radar")
     print(
         "run=%s eligible=%s scanned=%s rejected=%s errors=%s"
@@ -88,10 +92,10 @@ def print_text_report(report: ScanReport) -> None:
         )
     )
     print("")
-    print("Top 24h Gainers")
+    print("Top %sh Gainers" % window_hours)
     print_candidates(report.top_long)
     print("")
-    print("Top 24h Losers")
+    print("Top %sh Losers" % window_hours)
     print_candidates(report.top_short_watch)
     if report.errors:
         print("")

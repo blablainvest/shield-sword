@@ -271,7 +271,7 @@ class MppTokenIntelligenceClient:
             with urllib.request.urlopen(request, timeout=min(self.timeout_seconds, 12)) as response:
                 payload = response.read().decode("utf-8")
             parsed = json.loads(payload) if payload else {}
-            return parsed
+            return compact_lunarcrush_payload(path, parsed)
         except Exception as exc:  # noqa: BLE001 - optional enrichment must degrade cleanly.
             errors.append("%s: %s" % (path, exc))
             return {}
@@ -802,6 +802,115 @@ def lunar_endpoint_list(payload: Dict[str, Any], key: str) -> List[Dict[str, Any
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
     return []
+
+
+def compact_lunarcrush_payload(path: str, payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    data = payload.get("data")
+    if isinstance(data, list):
+        if "/time-series/" in path:
+            payload = dict(payload)
+            payload["data"] = [_compact_lunar_timeseries_row(row) for row in data[-48:] if isinstance(row, dict)]
+            return payload
+        if "/posts/" in path:
+            payload = dict(payload)
+            payload["data"] = [_compact_lunar_post(row) for row in data[:20] if isinstance(row, dict)]
+            return payload
+        if "/news/" in path:
+            payload = dict(payload)
+            payload["data"] = [_compact_lunar_text_row(row) for row in data[:10] if isinstance(row, dict)]
+            return payload
+        if "/creators/" in path:
+            payload = dict(payload)
+            payload["data"] = [_compact_lunar_creator(row) for row in data[:20] if isinstance(row, dict)]
+            return payload
+    if isinstance(data, dict):
+        payload = dict(payload)
+        payload["data"] = _compact_lunar_dict(data)
+    return payload
+
+
+def _compact_lunar_timeseries_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return _copy_keys(
+        row,
+        [
+            "time",
+            "timestamp",
+            "posts_active",
+            "posts_created",
+            "num_posts",
+            "contributors_active",
+            "interactions",
+            "sentiment",
+            "galaxy_score",
+            "alt_rank",
+            "spam",
+            "social_dominance",
+        ],
+    )
+
+
+def _compact_lunar_post(row: Dict[str, Any]) -> Dict[str, Any]:
+    return _copy_keys(
+        row,
+        [
+            "post_title",
+            "post_type",
+            "post_sentiment",
+            "interactions",
+            "creator_name",
+            "creator_display_name",
+            "creator_followers",
+            "created",
+            "time",
+            "url",
+        ],
+    )
+
+
+def _compact_lunar_text_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    return _copy_keys(row, ["title", "description", "summary", "sentiment", "created", "time", "url", "source"])
+
+
+def _compact_lunar_creator(row: Dict[str, Any]) -> Dict[str, Any]:
+    return _copy_keys(row, ["name", "display_name", "followers", "interactions", "posts_created", "posts_active"])
+
+
+def _compact_lunar_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    kept = _copy_keys(
+        row,
+        [
+            "id",
+            "name",
+            "symbol",
+            "short_summary",
+            "description",
+            "summary",
+            "posts_active",
+            "posts_created",
+            "num_posts",
+            "contributors_active",
+            "num_contributors",
+            "interactions",
+            "sentiment",
+            "galaxy_score",
+            "alt_rank",
+            "social_dominance",
+            "trend",
+            "categories",
+            "related_topics",
+            "topic_rank",
+        ],
+    )
+    for key in ("ai_summary", "metrics", "market", "social_metrics"):
+        if isinstance(row.get(key), dict):
+            kept[key] = _copy_keys(row[key], list(row[key].keys())[:40])
+    return kept
+
+
+def _copy_keys(row: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+    return {key: row[key] for key in keys if key in row and row[key] not in (None, "", [], {})}
 
 
 def social_volume_velocity_profile(

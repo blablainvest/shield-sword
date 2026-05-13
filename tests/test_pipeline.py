@@ -10,6 +10,7 @@ from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
     classify_fundamental,
+    compact_lunarcrush_payload,
     extract_lunarcrush_metrics,
     fdv_tier,
     fundamentals_stage_payload,
@@ -648,6 +649,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(metrics["social_volume_current"], 80)
         self.assertEqual(metrics["social_volume_previous"], 40)
         self.assertEqual(metrics["social_volume_source"], "topic_time_series")
+
+    def test_lunarcrush_raw_payload_is_compacted_before_storage(self):
+        payload = {
+            "data": [
+                {"time": index, "posts_active": index, "body": "x" * 1000}
+                for index in range(60)
+            ]
+        }
+
+        compacted = compact_lunarcrush_payload("/public/topic/%24abc/time-series/v2?bucket=hour", payload)
+
+        self.assertEqual(len(compacted["data"]), 48)
+        self.assertEqual(compacted["data"][0]["time"], 12)
+        self.assertNotIn("body", compacted["data"][0])
 
     def test_sqlite_history_round_trip(self):
         report = test_engine().scan(
