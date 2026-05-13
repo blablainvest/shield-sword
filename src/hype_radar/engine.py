@@ -401,7 +401,7 @@ class HypeRadarEngine:
         if not getter:
             return []
         try:
-            return getter(symbol, interval="1h", limit=24)
+            return getter(symbol, interval="1h", limit=48)
         except Exception:
             return []
 

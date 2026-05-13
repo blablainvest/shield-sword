@@ -233,7 +233,7 @@ def _volume_query(query: Dict[str, Any]) -> float:
 def normalize_symbol_from_query(value: str) -> str:
     text = str(value or "").strip()
     if not text:
-        raise ValueError("Empty symbol or Bybit URL.")
+        raise ValueError("Введите тикер или ссылку Bybit.")
 
     parsed = urlparse(text)
     token = ""
@@ -244,7 +244,7 @@ def normalize_symbol_from_query(value: str) -> str:
 
     symbol = _normalize_symbol_token(token)
     if not symbol:
-        raise ValueError("Invalid symbol. Use a Bybit linear USDT ticker like BTCUSDT or BTC.")
+        raise ValueError("Некорректный тикер. Используйте Bybit linear USDT тикер, например BTCUSDT или BTC.")
     return symbol
 
 
@@ -255,7 +255,7 @@ _KNOWN_NON_USDT_QUOTES = ("USDC", "USD", "EUR", "TRY")
 def _symbol_from_bybit_url(parsed: Any) -> str:
     host = parsed.netloc.lower()
     if host and host != "bybit.com" and not host.endswith(".bybit.com"):
-        raise ValueError("Only Bybit trade URLs are supported.")
+        raise ValueError("Поддерживаются только ссылки Bybit trade.")
 
     candidates = []
     parts = [unquote(part).strip() for part in parsed.path.split("/") if part.strip()]
@@ -272,7 +272,7 @@ def _symbol_from_bybit_url(parsed: Any) -> str:
         normalized = _normalize_symbol_token(candidate)
         if normalized:
             return normalized
-    raise ValueError("Could not find a USDT symbol in the Bybit URL.")
+    raise ValueError("Не удалось найти USDT тикер в ссылке Bybit.")
 
 
 def _normalize_symbol_token(value: str) -> str:

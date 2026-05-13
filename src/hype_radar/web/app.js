@@ -3,6 +3,7 @@ let researchCards = [];
 let searchResultCard = null;
 let searchStatus = { state: "idle", message: "" };
 let selectedView = "live";
+const SEARCH_TIMEOUT_MS = 120_000;
 const sortState = {
   topLong: { key: "price_change_pct", direction: "desc" },
   topShort: { key: "price_change_pct", direction: "asc" }
@@ -109,14 +110,17 @@ async function runSearch(event) {
     renderSearchResult();
     return;
   }
-  button.disabled = true;
-  button.textContent = "Ищем...";
+  setSearchButtonLoading(true);
   searchStatus = { state: "loading", message: "Запускаем реальный research pipeline." };
   renderSearchResult();
   const minVolume = minVolumeUsdt();
   const windowHours = searchWindowHours();
   try {
-    const response = await fetch(`/api/search/run?query=${encodeURIComponent(input)}&min_volume=${minVolume}&window_hours=${windowHours}`, { method: "POST" });
+    const response = await fetchWithTimeout(
+      `/api/search/run?query=${encodeURIComponent(input)}&min_volume=${minVolume}&window_hours=${windowHours}`,
+      { method: "POST" },
+      SEARCH_TIMEOUT_MS
+    );
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload.error || "Не удалось запустить анализ.");
@@ -129,9 +133,30 @@ async function runSearch(event) {
     searchStatus = { state: "error", message: error.message || "Не удалось запустить анализ." };
     renderSearchResult();
   } finally {
-    button.disabled = false;
-    button.textContent = "Найти";
+    setSearchButtonLoading(false);
   }
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 60_000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Research pipeline не ответил за 2 минуты. Запрос остановлен; попробуйте меньший период или повторите.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function setSearchButtonLoading(isLoading) {
+  const currentButton = document.getElementById("runSearch");
+  if (!currentButton) return;
+  currentButton.disabled = Boolean(isLoading);
+  currentButton.textContent = isLoading ? "Ищем..." : "Найти";
 }
 
 function render() {
@@ -315,61 +340,48 @@ function renderSearchResult() {
   document.querySelectorAll("#searchResult [data-open-research]").forEach((button) => {
     button.addEventListener("click", () => openResearchCard(searchResultCard.symbol, searchResultCard.run_id, searchResultCard.research_id));
   });
+  hydrateSocialCharts(resultTarget);
 }
 
 function searchResearchCardHtml(card) {
-  const final = card.pipeline?.candidate || {};
-  const setup = card.setup || {};
   const metrics = searchQuickMetrics(card);
-  const blockingStage = (card.pipeline?.stages || []).find((stage) => stage?.blocking || stage?.status === "fail" || stage?.status === "error");
-  const verdict = card.final_verdict || final.verdict || "SKIPPED";
+  const decision = normalizedDecisionLayer(card);
+  const blocks = decision.blocks || {};
+  const project = blocks.project || fallbackProjectBlock(card, decision);
   return `<article class="search-result-card">
-    <section class="search-hero">
+    <section class="search-hero project-card-block">
       <div>
         <time>${formatDate(card.created_at)}</time>
         <h2>${escapeHtml(card.symbol || "")}</h2>
-        <p>${escapeHtml(final.reason_summary || setup.reason || "Пайплайн завершен без итогового резюме.")}</p>
+        <div class="tag-row">
+          <span class="section-tag">${escapeHtml(project.tag || "Карточка проекта")}</span>
+          <span class="section-tag muted">${escapeHtml(project.cvd_summary?.label || cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias))}</span>
+        </div>
+        <p>${escapeHtml(project.project_one_liner || decision.final_decision?.no_trade_reason || decision.action || "Пайплайн завершен без итогового резюме.")}</p>
       </div>
       <div class="search-hero-side">
-        <span class="verdict-badge">${escapeHtml(verdict)}</span>
-        <dl>
-          <div><dt>Стратегия</dt><dd>${escapeHtml(card.strategy_identifier || final.strategy_identifier || "unknown")}</dd></div>
-          <div><dt>Direction</dt><dd>${escapeHtml(final.direction_bias || "unavailable")}</dd></div>
-          <div><dt>Confidence</dt><dd>${scoreValue(final.confidence)}</dd></div>
-        </dl>
+        <span class="verdict-badge ${decisionClass(decision.verdict || project.status)}">${escapeHtml(project.status_label || decision.final_decision?.action || decision.verdict_label || "Наблюдать")}</span>
+        ${definitionList([
+          ["Итог", decision.final_decision?.summary || decision.action],
+          ["Сторона", sideLabel(decision.final_decision?.side || decision.preferred_side)],
+          ["Что нужно", (decision.activation_triggers || []).slice(0, 2).join(" ")],
+          ["CVD", project.cvd_summary?.explanation || cvdMetricNote(metrics.cvd_value, metrics.cvd_bias)]
+        ])}
         <button type="button" data-open-research>Полная карточка</button>
       </div>
     </section>
     <section class="quick-metrics">
       ${quickMetric("Изм. цены", pct(metrics.price_change_pct), `${metrics.window_hours}ч`, metrics.price_change_pct)}
-      ${quickMetric("Изм. объема", pct(metrics.volume_change_pct), `${metrics.window_hours}ч`, metrics.volume_change_pct)}
-      ${quickMetric("Turnover 24ч", money(metrics.turnover_24h), "Bybit", metrics.turnover_24h)}
-      ${quickMetric("Funding", pct(metrics.funding_rate), "perp", metrics.funding_rate)}
-      ${quickMetric("Open Interest", money(metrics.open_interest_value) || metricNumber(metrics.open_interest), "Bybit", metrics.open_interest_value ?? metrics.open_interest)}
-      ${quickMetric("Long / Short", longShort(metrics.long_ratio, metrics.short_ratio), metrics.long_short_status || "ratio", metrics.long_ratio ?? metrics.short_ratio)}
+      ${quickMetric("Изм. объема", pct(metrics.volume_change_pct), `${metrics.window_hours}ч`, metrics.volume_change_pct, { omitIfMissing: true })}
+      ${quickMetric("Объем 24ч", money(metrics.turnover_24h), "Bybit", metrics.turnover_24h)}
+      ${quickMetric("Фандинг", pct(metrics.funding_rate), "бессрочный контракт", metrics.funding_rate)}
+      ${quickMetric("Лонги / шорты", longShort(metrics.long_ratio, metrics.short_ratio), "соотношение позиций", metrics.long_ratio ?? metrics.short_ratio)}
+      ${quickMetric("CVD", cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias), "баланс покупок и продаж", metrics.cvd_value)}
     </section>
-    <section class="search-section-grid">
-      <article>
-        <h2>Фундаментал</h2>
-        ${stageSummary(card.fundamentals, blockingStage)}
-      </article>
-      <article>
-        <h2>Социальный анализ</h2>
-        ${stageSummary(card.sentiment, blockingStage)}
-      </article>
-      <article>
-        <h2>ТА</h2>
-        ${technicalAnalysisSummary(card.technical_analysis, card.strategy_identifier || final.strategy_identifier)}
-      </article>
-      <article>
-        <h2>Резюме / вердикт</h2>
-        <div class="stage-summary">
-          <span class="badge ${card.failed_stage ? "warn" : "pass"}">${escapeHtml(verdict)}</span>
-          ${bulletList(card.summary)}
-          ${setup.reason ? `<p>${escapeHtml(setup.reason)}</p>` : ""}
-          ${card.failed_stage ? `<p>Остановлено на этапе: ${escapeHtml(stageLabel(card.failed_stage))}.</p>` : ""}
-        </div>
-      </article>
+    <section class="decision-blocks">
+      ${fundamentalDecisionBlock(blocks.fundamental, card.fundamentals)}
+      ${socialDecisionBlock(blocks.social, card.research_charts, card.sentiment)}
+      ${taDecisionBlock(blocks.ta, card.technical_analysis)}
     </section>
   </article>`;
 }
@@ -377,6 +389,7 @@ function searchResearchCardHtml(card) {
 function searchQuickMetrics(card) {
   const pipelineMetrics = marketMetrics(card.pipeline || {});
   const derivatives = card.technical_analysis?.metrics?.derivatives_filter?.metrics || {};
+  const cvd = derivatives.cvd || {};
   return {
     window_hours: pipelineMetrics.scan_window_hours || searchWindowHours(),
     price_change_pct: pipelineMetrics.price_change_pct,
@@ -387,17 +400,286 @@ function searchQuickMetrics(card) {
     open_interest_value: pipelineMetrics.open_interest_value ?? derivatives.open_interest_value,
     long_ratio: pipelineMetrics.long_ratio ?? derivatives.long_ratio,
     short_ratio: pipelineMetrics.short_ratio ?? derivatives.short_ratio,
-    long_short_status: derivatives.long_short_ratio_status
+    long_short_status: derivatives.long_short_ratio_status,
+    cvd_value: cvd.cvd_base,
+    cvd_bias: cvdBiasFromValue(cvd.cvd_base)
   };
 }
 
-function quickMetric(label, value, note, rawValue) {
+function quickMetric(label, value, note, rawValue, options = {}) {
   const available = rawValue !== null && rawValue !== undefined && rawValue !== "" && value && value !== "н/д";
+  if (!available && options.omitIfMissing) return "";
   return `<div class="quick-card ${available ? "" : "unavailable"}">
     <span>${escapeHtml(label)}</span>
-    <strong>${escapeHtml(available ? value : "unavailable")}</strong>
-    <em>${escapeHtml(available ? note : "Нет данных в ответе источника")}</em>
+    <strong>${escapeHtml(available ? value : "нет данных")}</strong>
+    <em>${escapeHtml(available ? note : "источник не вернул значение")}</em>
   </div>`;
+}
+
+function normalizedDecisionLayer(card) {
+  const layer = card.decision_layer || {};
+  const fallbackVerdict = card.final_verdict || card.pipeline?.candidate?.verdict || "WATCH_ONLY";
+  const blocks = layer.blocks || {
+    project: fallbackProjectBlock(card, layer),
+    fundamental: fallbackFundamentalBlock(card.fundamentals),
+    social: fallbackSocialBlock(card.sentiment, card.research_charts),
+    ta: fallbackTaBlock(card.technical_analysis)
+  };
+  if (!blocks.project) blocks.project = fallbackProjectBlock(card, layer);
+  return {
+    ...layer,
+    verdict: layer.verdict || fallbackVerdict,
+    verdict_label: layer.verdict_label || verdictLabelRu(fallbackVerdict),
+    action: layer.action || "Сделки нет; наблюдать до появления подтверждений.",
+    activation_triggers: layer.activation_triggers || [],
+    preferred_side: layer.preferred_side || "watch_only",
+    blocks,
+    final_decision: layer.final_decision || {
+      action: verdictLabelRu(fallbackVerdict),
+      side: layer.preferred_side || "watch_only",
+      summary: layer.action || "Сделки нет; наблюдать.",
+      no_trade_reason: layer.no_trade_reason || card.pipeline?.candidate?.reason_summary || "Недостаточно edge для сделки."
+    }
+  };
+}
+
+function fallbackProjectBlock(card, layer = {}) {
+  const metrics = searchQuickMetrics(card);
+  const fundamentals = card.fundamentals?.metrics || {};
+  const verdict = layer.verdict || card.final_verdict || card.pipeline?.candidate?.verdict || "WATCH_ONLY";
+  return {
+    tag: fundamentals.fdv_tier_label || "Карточка проекта",
+    status: verdict,
+    status_label: verdictLabelRu(verdict),
+    project_one_liner: fundamentals.project_brief_ru || fundamentals.project_summary || "",
+    cvd_summary: {
+      label: cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias),
+      bias: metrics.cvd_bias,
+      explanation: cvdMetricNote(metrics.cvd_value, metrics.cvd_bias),
+      value: metrics.cvd_value
+    }
+  };
+}
+
+function fallbackFundamentalBlock(stage) {
+  const metrics = stage?.metrics || {};
+  const split = fundamentalSplit(metrics);
+  return {
+    verdict: split.hardBlockers.length ? "risk" : "ok",
+    verdict_label: split.hardBlockers.length ? "Риск" : "ОК",
+    tag: split.hardBlockers.length ? "Риск supply" : "Фундаментал без красных флагов",
+    status_help: "",
+    summary: metrics.project_brief_ru || metrics.project_summary || "Описание проекта пока недоступно.",
+    blockers: split.hardBlockers,
+    reasons: split.hardBlockers.slice(0, 2),
+    trade_impact: split.hardBlockers.length ? "Фундаментал требует осторожности." : "Фундаментал не мешает сделке."
+  };
+}
+
+function fallbackSocialBlock(sentiment, chartsStage) {
+  const metrics = sentiment?.metrics || {};
+  const scenario = scenarioRu(chartsStage?.metrics?.scenario?.code);
+  return {
+    verdict: "watch",
+    verdict_label: "Наблюдать",
+    tag: scenario.label,
+    scenario_label_ru: scenario.label,
+    summary: scenario.summary,
+    chart_explanation: chartExplanationText(),
+    translated_posts: metrics.top_posts_ru || [],
+    top_posts_summary_ru: metrics.top_posts_summary_ru || "",
+    trade_impact: chartsStage?.metrics?.scenario?.conclusion || "Ждать подтверждения ценой и объемом.",
+    velocity_ratio: metrics.social_volume_velocity_ratio,
+    velocity_level: velocityLevel(metrics.social_volume_velocity_ratio),
+    current_mentions: metrics.social_volume_current ?? metrics.social_volume_24h,
+    baseline_mentions: metrics.social_volume_baseline,
+    baseline_label: "База упоминаний",
+    window_label: "Окно замера",
+    window: metrics.social_volume_timeframe
+  };
+}
+
+function fallbackTaBlock(technicalAnalysis) {
+  const ta = technicalAnalysis?.metrics?.decision_relevant_ta || {};
+  return {
+    verdict: "no_confirmation",
+    verdict_label: "Нет подтверждения",
+    tag: "Нет подтверждения",
+    strategy_label: "Нет подтверждения",
+    cvd_summary: {
+      label: "CVD: нет данных",
+      explanation: "CVD — баланс рыночных покупок и продаж."
+    },
+    summary: ta.summary || "ТА пока не дала отдельного вывода.",
+    supports: (ta.positives || []).map((item) => item.label || item.key),
+    conflicts: (ta.negatives || []).map((item) => item.label || item.key),
+    entry_conditions: ["Ждать подтверждения структуры, объема и CVD."],
+    invalidation: "Отменить идею при сломе локальной структуры против выбранной стороны.",
+    trade_impact: "ТА не дает достаточно сильной точки входа.",
+    terms: [
+      "CVD — разница рыночных покупок и продаж.",
+      "ATR — текущая волатильность для оценки стопа.",
+      "RSI — индикатор перегрева или перепроданности."
+    ]
+  };
+}
+
+function fundamentalDecisionBlock(block, stage) {
+  const data = block || fallbackFundamentalBlock(stage);
+  const metrics = stage?.metrics || {};
+  const reasons = data.reasons?.length ? data.reasons : data.blockers?.slice(0, 2);
+  const label = data.verdict_label === "Блокер" ? "Блокирующий риск" : data.verdict_label;
+  const statusHelp = data.status_help || (data.verdict === "blocker" ? "Блокирующий риск — фактор, из-за которого сделку не открываем без ручной проверки." : "");
+  return `<article class="decision-card fundamental">
+    <div class="decision-card-head">
+      <h2>Фундаментал</h2>
+      <span class="badge ${decisionBadgeClass(data.verdict)}">${escapeHtml(label || "ОК")}</span>
+    </div>
+    <div class="tag-row"><span class="section-tag">${escapeHtml(data.tag || label || "Фундаментал")}</span></div>
+    ${statusHelp ? `<p class="microcopy">${escapeHtml(statusHelp)}</p>` : ""}
+    ${fundamentalMarketSnapshot(metrics)}
+    <section>
+      <h3>Причины</h3>
+      ${bulletList(reasons?.length ? reasons : ["Критичных фундаментальных ограничений не найдено."])}
+    </section>
+    <p class="trade-impact">${escapeHtml(cleanTradeCopy(data.trade_impact || ""))}</p>
+  </article>`;
+}
+
+function fundamentalMarketSnapshot(metrics) {
+  const rows = [
+    ["MC", money(metrics.market_cap)],
+    ["FDV", money(metrics.fdv)],
+    ["Циркуляция", ratioPct(metrics.circulating_supply_ratio)],
+    ["Сектор", metrics.sector || metrics.narrative]
+  ];
+  const visibleRows = compactMetricRows(rows);
+  if (!visibleRows.length) return "";
+  return `<section class="fundamental-snapshot">
+    <h3>Ключевые параметры</h3>
+    ${definitionList(visibleRows)}
+  </section>`;
+}
+
+function socialDecisionBlock(block, chartsStage, sentiment) {
+  const data = block || fallbackSocialBlock(sentiment, chartsStage);
+  const posts = russianPostList(data.translated_posts || []);
+  return `<article class="decision-card social">
+    <div class="decision-card-head">
+      <h2>Social Intelligence</h2>
+      <span class="badge ${decisionBadgeClass(data.verdict)}">${escapeHtml(data.verdict_label || "Наблюдать")}</span>
+    </div>
+    <div class="tag-row"><span class="section-tag social-tag">${escapeHtml(data.tag || data.scenario_label_ru || "Смешанная картина")}</span></div>
+    <section>
+      <h3>Обоснование</h3>
+      <p>${escapeHtml(data.summary || "")}</p>
+    </section>
+    ${socialMetricsExplainer(data)}
+    ${researchChartsSummary(chartsStage)}
+    ${data.top_posts_summary_ru ? `<section><h3>Вывод по топ-постам</h3><p>${escapeHtml(data.top_posts_summary_ru)}</p></section>` : ""}
+    ${posts.length ? `<section><h3>Топ-посты LunarCrush</h3>${numberedList(posts)}</section>` : ""}
+    <p class="trade-impact">${escapeHtml(data.trade_impact || "Ждать подтверждения рынком.")}</p>
+  </article>`;
+}
+
+function taDecisionBlock(block, technicalAnalysis) {
+  const data = block || fallbackTaBlock(technicalAnalysis);
+  return `<article class="decision-card ta">
+    <div class="decision-card-head">
+      <h2>ТА</h2>
+      <span class="badge ${decisionBadgeClass(data.verdict)}">${escapeHtml(data.verdict_label || "Нет подтверждения")}</span>
+    </div>
+    <div class="tag-row"><span class="section-tag ta-tag">${escapeHtml(data.tag || data.strategy_label || "Торговая стратегия")}</span></div>
+    <p>${escapeHtml(data.summary || "")}</p>
+    ${taMarketContext(data)}
+    ${data.supports?.length ? `<section><h3>Подтверждения</h3>${bulletList(data.supports)}</section>` : ""}
+    ${data.conflicts?.length ? `<section><h3>Конфликты</h3>${bulletList(data.conflicts)}</section>` : ""}
+    <section>
+      <h3>Условия входа</h3>
+      ${bulletList(data.entry_conditions || [])}
+    </section>
+    <p class="trade-impact">${escapeHtml(data.trade_impact || "")}</p>
+    <details class="term-details">
+      <summary>Расшифровка терминов</summary>
+      ${bulletList(data.terms || [])}
+    </details>
+  </article>`;
+}
+
+function socialMetricsExplainer(data) {
+  return definitionList([
+    ["Упоминания", wholeNumber(data.current_mentions)],
+    [data.baseline_label || "База упоминаний", wholeNumber(data.baseline_mentions)],
+    ["Скорость", `${velocityRatio(data.velocity_ratio)} · ${data.velocity_level || velocityLevel(data.velocity_ratio)}`],
+    [data.window_label || "Окно замера", timeframeLabel(data.window)]
+  ]);
+}
+
+function verdictLabelRu(verdict) {
+  return ({
+    LONG_ENTER: "Лонг активен",
+    LONG_WAIT_PULLBACK: "Ждать лонг",
+    SHORT_ENTER: "Шорт активен",
+    SHORT_WATCH: "Ждать шорт",
+    WATCH_ONLY: "Наблюдать",
+    AVOID: "Не торговать",
+    NO_SCORE: "Нет скоринга"
+  })[verdict] || "Наблюдать";
+}
+
+function sideLabel(side) {
+  return ({ long: "лонг", short: "шорт", watch_only: "наблюдать" })[side] || "нейтрально";
+}
+
+function decisionBadgeClass(verdict) {
+  if (["ok", "long_confirmed", "short_confirmed"].includes(verdict)) return "pass";
+  if (["blocker", "conflict"].includes(verdict)) return "fail";
+  return "warn";
+}
+
+function decisionClass(verdict) {
+  if (["LONG_ENTER", "SHORT_ENTER", "ok", "long_confirmed", "short_confirmed"].includes(verdict)) return "pass";
+  if (["AVOID", "blocker", "conflict"].includes(verdict)) return "fail";
+  return "warn";
+}
+
+function taMarketContext(data) {
+  const cvd = data.cvd_summary || {};
+  const rows = [
+    ["CVD", cvd.label],
+    ["Смысл CVD", cvd.explanation]
+  ];
+  return `<section class="ta-market-context">${definitionList(rows)}</section>`;
+}
+
+function numberedList(items) {
+  const rows = (items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  return `<ol>${rows || "<li>Данных пока нет.</li>"}</ol>`;
+}
+
+function russianPostList(items) {
+  return (items || []).filter((item) => /[А-Яа-яЁё]/.test(String(item || ""))).slice(0, 5);
+}
+
+function timeframeLabel(value) {
+  if (!value) return "нет данных";
+  if (value === "hour") return "1 час";
+  return String(value).replace("h", "ч");
+}
+
+function stripProjectTaxonomy(text) {
+  return String(text || "")
+    .replace(/\s*Категори[яи]:[^.]+\.?/gi, "")
+    .replace(/\s*Sector:[^.]+\.?/gi, "")
+    .replace(/\s*Chain\/ecosystem:[^.]+\.?/gi, "")
+    .trim();
+}
+
+function cleanTradeCopy(text) {
+  return String(text || "")
+    .replace(/пока блокер не проверен вручную/gi, "пока риск не проверен вручную")
+    .replace(/блокер/gi, "блокирующий риск")
+    .replace(/hard blocker/gi, "блокирующий риск");
 }
 
 function backtestTableHead() {
@@ -512,6 +794,11 @@ function outcomeLabel(card, setupKind) {
 function researchCardHtml(card) {
   const pipeline = card.pipeline || {};
   const stages = pipeline.stages || [];
+  const decision = normalizedDecisionLayer(card);
+  const blocks = decision.blocks || {};
+  const tags = [blocks.project?.tag, blocks.fundamental?.tag, blocks.social?.tag || blocks.social?.scenario_label_ru, blocks.ta?.tag]
+    .filter(Boolean)
+    .slice(0, 4);
   return `<article class="pipeline-card" data-symbol="${card.symbol}" data-run-id="${card.run_id || ""}" data-research-id="${card.research_id || ""}">
     <div class="pipeline-header">
       <div>
@@ -519,6 +806,7 @@ function researchCardHtml(card) {
         <strong>${card.symbol}</strong>
       </div>
     </div>
+    ${tags.length ? `<div class="pipeline-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
     <div class="pipeline-badges">${pipelineBadgeList(stages)}</div>
   </article>`;
 }
@@ -526,37 +814,88 @@ function researchCardHtml(card) {
 function openResearchCard(symbol, runId = "", researchId = "") {
   const card = researchCardByIdentity(symbol, runId, researchId);
   if (!card) return;
-  const setup = card.setup || {};
   const pipeline = card.pipeline || {};
   const stages = stageOrder.map((name) => (pipeline.stages || []).find((stage) => stage.stage === name)).filter(Boolean);
-  const blockingStage = stages.find((stage) => stage?.blocking || stage?.status === "fail" || stage?.status === "error");
   document.getElementById("drawerContent").innerHTML = `
     <h1>${card.symbol}</h1>
-    <p>${setupLabel(setup.label)} | ${escapeHtml(card.strategy_identifier || pipeline.candidate?.strategy_identifier || "unknown")} | ${escapeHtml(setup.reason || "")}</p>
-    <h2>Резюме</h2>
-    ${bulletList(card.summary)}
-    <h2>Почему движение</h2>
-    ${bulletList(card.why_it_moved)}
-    <h2>Social / Price / Volume</h2>
-    ${researchChartsSummary(card.research_charts)}
-    <h2>Ссылки</h2>
-    <div class="link-list">
-      ${Object.entries(card.links || {}).map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`).join("")}
-    </div>
-    <h2>Фундаментал</h2>
-    ${stageSummary(card.fundamentals, blockingStage)}
-    <h2>Соцфильтр</h2>
-    ${stageSummary(card.sentiment, blockingStage)}
-    <h2>Риск ликвидности / манипулятивности</h2>
-    ${stageSummary(card.manipulation, blockingStage)}
-    <h2>Теханализ</h2>
-    ${technicalAnalysisSummary(card.technical_analysis, card.strategy_identifier || pipeline.candidate?.strategy_identifier)}
-    <h2>Сетап</h2>
-    <pre>${escapeHtml(JSON.stringify(localizedSetup(setup), null, 2))}</pre>
-    <h2>Пайплайн</h2>
-    <div class="timeline">${stages.map(stageBlock).join("")}</div>
+    ${searchResearchCardHtml(card)}
+    <details class="audit-details">
+      <summary>Технические детали</summary>
+      <h2>Ссылки</h2>
+      <div class="link-list">
+        ${Object.entries(card.links || {}).map(([label, url]) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`).join("")}
+      </div>
+      <h2>Пайплайн</h2>
+      <div class="timeline">${stages.map(stageBlock).join("")}</div>
+      <h2>JSON сетапа</h2>
+      <pre>${escapeHtml(JSON.stringify(localizedSetup(card.setup || {}), null, 2))}</pre>
+    </details>
   `;
   document.getElementById("drawer").classList.add("open");
+  hydrateSocialCharts(document.getElementById("drawerContent"));
+}
+
+function decisionLayerSummary(layer) {
+  const data = layer || {};
+  const derivatives = data.derivatives || {};
+  const fundamentals = data.fundamentals || {};
+  const ta = data.ta || {};
+  const rows = [
+    ["Вердикт", data.verdict_label || data.verdict],
+    ["Действие", data.action],
+    ["Почему нет сделки", data.no_trade_reason],
+    ["Главный риск", data.primary_risk ? `${data.primary_risk.label}: ${data.primary_risk.reason}` : null],
+    ["Next step", data.chart_next_step]
+  ];
+  const derivativeRows = [
+    ["CVD", derivatives.cvd_status === "available" ? `${metricNumber(derivatives.cvd_base)} (${cvdBiasLabel(derivatives.cvd_bias)})` : "нет данных"],
+    ["Конфликт CVD", derivatives.cvd_conflict ? derivatives.cvd_conflict_reason : "нет"],
+    ["Фандинг", pct(derivatives.funding_rate)],
+    ["Лонги / шорты", longShort(derivatives.long_ratio, derivatives.short_ratio)]
+  ];
+  return `<div class="decision-layer">
+    ${definitionList(rows)}
+    <section>
+      <h3>Триггеры активации</h3>
+      ${bulletList(data.activation_triggers || [])}
+    </section>
+    <section>
+      <h3>Derivatives / CVD</h3>
+      ${definitionList(derivativeRows)}
+    </section>
+    <section>
+      <h3>Fundamentals split</h3>
+      <div class="split-grid">
+        <div>
+          <h4>Hard blockers</h4>
+          ${bulletList(fundamentals.hard_blockers?.length ? fundamentals.hard_blockers : ["Критичных hard blockers нет."])}
+        </div>
+        <div>
+          <h4>Context only</h4>
+          ${bulletList(fundamentals.context_only || [])}
+        </div>
+      </div>
+    </section>
+    <section>
+      <h3>Decision-relevant TA</h3>
+      <p>${escapeHtml(ta.summary || "Нет агрегированного TA вывода.")}</p>
+      ${definitionList([
+        ["Bias", ta.preferred_side],
+        ["TA decision score", metricNumber(ta.decision_score)],
+        ["Positive / negative", `${metricNumber(ta.positive_score)} / ${metricNumber(ta.negative_score)}`]
+      ])}
+      <div class="split-grid">
+        <div>
+          <h4>Поддерживает</h4>
+          ${weightedSignalList(ta.positives)}
+        </div>
+        <div>
+          <h4>Мешает</h4>
+          ${weightedSignalList(ta.negatives)}
+        </div>
+      </div>
+    </section>
+  </div>`;
 }
 
 function stageSummary(stage, blockingStage = null) {
@@ -576,36 +915,264 @@ function stageSummary(stage, blockingStage = null) {
 
 function researchChartsSummary(stage) {
   const metrics = stage?.metrics || {};
-  const charts = metrics.charts || {};
-  const scenario = metrics.scenario || {};
-  const oi = metrics.derivatives?.open_interest || {};
-  const rows = [
-    ["Scenario", scenario.label],
-    ["Conclusion", scenario.conclusion],
-    ["Mentions source", `${charts.mentions?.status || "unavailable"} / ${charts.mentions?.source || "lunarcrush"}`],
-    ["Open interest", `${oi.status || "unavailable"}${oi.change_pct !== null && oi.change_pct !== undefined ? `, ${pct(oi.change_pct)}` : ""}`],
-    ["Research time", formatDate(metrics.research_time)]
-  ];
   return `<div class="stage-summary chart-summary">
-    <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
-    <p>${escapeHtml(stageReason(stage) || scenario.conclusion || "Chart stage has not run yet.")}</p>
-    ${definitionList(rows)}
-    <div class="chart-grid">
-      ${lineChart(charts.mentions, "mentions")}
-      ${lineChart(charts.price_change, "price")}
-      ${lineChart(charts.volume_change, "volume")}
+    <div class="chart-window-meta">
+      <span>Окно: ${escapeHtml(metrics.window_hours ? `${metrics.window_hours}ч` : "нет данных")}</span>
+      <span>Начало: ${escapeHtml(chartEdgeTime(metrics, "first") || "—")}</span>
+      <span>Конец: ${escapeHtml(chartEdgeTime(metrics, "last") || "—")}</span>
     </div>
-    <section>
-      <h3>Scenario evidence</h3>
-      ${bulletList(scenario.evidence || [])}
-    </section>
+    ${overlayChart(metrics)}
   </div>`;
+}
+
+function overlayChart(metrics) {
+  const points = metrics?.indexed_points || [];
+  const valid = points.filter((point) => ["mentions", "price", "volume"].some((key) => Number.isFinite(Number(point?.[key]))));
+  if (!points.length || !valid.length) {
+    return `<section class="overlay-chart">
+      <div class="chart-empty">${escapeHtml(metrics?.scenario?.conclusion || "Нет данных для нормализованного графика")}</div>
+    </section>`;
+  }
+  const width = 620;
+  const height = 220;
+  const padX = 38;
+  const padY = 22;
+  const plotWidth = width - padX * 2;
+  const plotHeight = height - padY * 2;
+  const series = [
+    ["mentions", "Упоминания", "mentions"],
+    ["price", "Цена", "price"],
+    ["volume", "Объем", "volume"]
+  ];
+  const payload = chartPointPayload(metrics, points);
+  const xFor = (index) => padX + (index * plotWidth) / Math.max(1, points.length - 1);
+  const yFor = (value) => height - padY - (Math.max(0, Math.min(100, value)) / 100) * plotHeight;
+  const lines = series.map(([key, label, className]) => {
+    const coords = points.map((point, index) => {
+      const value = Number(point?.[key]);
+      if (!Number.isFinite(value)) return null;
+      return `${xFor(index).toFixed(1)},${yFor(value).toFixed(1)}`;
+    }).filter(Boolean);
+    if (!coords.length) return "";
+    return `<polyline class="overlay-line ${className}" data-series="${className}" points="${coords.join(" ")}"><title>${escapeHtml(label)}</title></polyline>`;
+  }).join("");
+  const hoverPoints = payload.map((point, index) => {
+    const x = xFor(index).toFixed(1);
+    const circles = series.map(([key, label, className]) => {
+      const value = Number(points[index]?.[key]);
+      if (!Number.isFinite(value)) return "";
+      return `<circle class="chart-hotspot ${className}" data-series="${className}" data-point="${index}" cx="${x}" cy="${yFor(value).toFixed(1)}" r="9">
+        <title>${escapeHtml(label)} · ${escapeHtml(point.time_label)} · ${metricNumber(value)}</title>
+      </circle>`;
+    }).join("");
+    return circles;
+  }).join("");
+  const events = metrics?.events || {};
+  const markers = [
+    ["mentions_event", "M", "mentions"],
+    ["price_event", "P", "price"],
+    ["volume_event", "V", "volume"]
+  ].map(([key, label, className]) => {
+    const event = events[key];
+    const index = Number(event?.index);
+    if (!Number.isFinite(index)) return "";
+    const x = xFor(index);
+    return `<g class="event-marker ${className}">
+      <line x1="${x.toFixed(1)}" y1="${padY}" x2="${x.toFixed(1)}" y2="${height - padY}"></line>
+      <text x="${x.toFixed(1)}" y="${padY - 6}" text-anchor="middle">${label}</text>
+      <title>${escapeHtml(eventLabel(key))}: ${escapeHtml(formatDate(event.time))}</title>
+    </g>`;
+  }).join("");
+  return `<section class="overlay-chart">
+    <div class="overlay-chart-head">
+      <h3>Social Intelligence</h3>
+      <div class="overlay-legend">
+        ${series.map(([, label, className]) => `<button type="button" class="${className}" data-chart-toggle="${className}"><i></i>${label}</button>`).join("")}
+      </div>
+    </div>
+    <div class="chart-canvas" data-chart-points="${escapeHtml(JSON.stringify(payload))}">
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Нормализованный график упоминаний, цены и объема">
+      <line x1="${padX}" y1="${padY}" x2="${padX}" y2="${height - padY}" class="chart-axis"></line>
+      <line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}" class="chart-axis"></line>
+      <line x1="${padX}" y1="${height / 2}" x2="${width - padX}" y2="${height / 2}" class="chart-zero"></line>
+      <line class="chart-crosshair" x1="${padX}" y1="${padY}" x2="${padX}" y2="${height - padY}"></line>
+      ${lines}
+      ${markers}
+      ${hoverPoints}
+      </svg>
+      <div class="chart-tooltip" hidden></div>
+    </div>
+    <div class="event-strip">
+      ${eventStripItem("M: всплеск упоминаний", events.mentions_event)}
+      ${eventStripItem("P: всплеск цены", events.price_event)}
+      ${eventStripItem("V: всплеск объема", events.volume_event)}
+    </div>
+    <p class="chart-now">Сейчас: ${escapeHtml(currentChartState(metrics))}</p>
+  </section>`;
+}
+
+function chartPointPayload(metrics, indexedPoints) {
+  const charts = metrics?.charts || {};
+  const mentions = charts.mentions?.points || [];
+  const price = charts.price_change?.points || [];
+  const volume = charts.volume_change?.points || [];
+  return (indexedPoints || []).map((point, index) => ({
+    time: point.time,
+    time_label: formatDate(point.time),
+    mentions_norm: point.mentions,
+    price_norm: point.price,
+    volume_norm: point.volume,
+    mentions_raw: mentions[index]?.value,
+    price_raw: price[index]?.value,
+    volume_raw: volume[index]?.value
+  }));
+}
+
+function currentChartState(metrics) {
+  const scenario = scenarioRu(metrics?.scenario?.code);
+  const events = metrics?.events || {};
+  const order = [
+    events.mentions_event ? ["соцсигнал впереди", Number(events.mentions_event.index)] : null,
+    events.price_event ? ["цена впереди", Number(events.price_event.index)] : null,
+    events.volume_event ? ["объем подтвердил", Number(events.volume_event.index)] : null
+  ].filter((item) => item && Number.isFinite(item[1])).sort((a, b) => a[1] - b[1]);
+  if (order.length) return `${order[0][0]}; сценарий: ${scenario.label}.`;
+  return `подтверждения нет; сценарий: ${scenario.label}.`;
+}
+
+function hydrateSocialCharts(root = document) {
+  root.querySelectorAll(".overlay-chart").forEach((chart) => {
+    const canvas = chart.querySelector(".chart-canvas");
+    const svg = chart.querySelector("svg");
+    const tooltip = chart.querySelector(".chart-tooltip");
+    const crosshair = chart.querySelector(".chart-crosshair");
+    if (!canvas || !svg || !tooltip || chart.dataset.hydrated === "1") return;
+    chart.dataset.hydrated = "1";
+    let points = [];
+    try {
+      points = JSON.parse(canvas.dataset.chartPoints || "[]");
+    } catch {
+      points = [];
+    }
+    chart.querySelectorAll("[data-chart-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const series = button.dataset.chartToggle;
+        const hidden = button.classList.toggle("off");
+        button.classList.toggle("off", hidden);
+        chart.querySelectorAll(`[data-series="${series}"]`).forEach((node) => {
+          node.classList.toggle("series-hidden", hidden);
+        });
+      });
+    });
+    chart.querySelectorAll(".chart-hotspot").forEach((hotspot) => {
+      const show = () => showChartPoint(points, Number(hotspot.dataset.point), hotspot, tooltip, crosshair);
+      hotspot.addEventListener("mouseenter", show);
+      hotspot.addEventListener("focus", show);
+      hotspot.addEventListener("click", show);
+      hotspot.addEventListener("mouseleave", () => hideChartTooltip(tooltip, crosshair));
+      hotspot.setAttribute("tabindex", "0");
+    });
+  });
+}
+
+function showChartPoint(points, index, hotspot, tooltip, crosshair) {
+  const point = points[index] || {};
+  const x = hotspot.getAttribute("cx") || "0";
+  crosshair.setAttribute("x1", x);
+  crosshair.setAttribute("x2", x);
+  crosshair.classList.add("active");
+  tooltip.hidden = false;
+  tooltip.style.left = `${Math.min(78, Math.max(10, (Number(x) / 620) * 100))}%`;
+  tooltip.innerHTML = `
+    <strong>${escapeHtml(point.time_label || "Нет времени")}</strong>
+    <span>Упоминания: ${escapeHtml(chartMetricPair(point.mentions_norm, point.mentions_raw, "mentions"))}</span>
+    <span>Цена: ${escapeHtml(chartMetricPair(point.price_norm, point.price_raw, "price"))}</span>
+    <span>Объем: ${escapeHtml(chartMetricPair(point.volume_norm, point.volume_raw, "volume"))}</span>
+  `;
+}
+
+function hideChartTooltip(tooltip, crosshair) {
+  tooltip.hidden = true;
+  crosshair.classList.remove("active");
+}
+
+function chartMetricPair(norm, raw, kind) {
+  const normalized = Number.isFinite(Number(norm)) ? `${Number(norm).toFixed(0)}/100` : "—";
+  let rawLabel = "—";
+  if (Number.isFinite(Number(raw))) {
+    rawLabel = kind === "mentions" ? wholeNumber(raw) : pct(raw);
+  }
+  return `${normalized}; исходное: ${rawLabel}`;
+}
+
+function eventStripItem(label, event) {
+  if (!event) return `<span>${escapeHtml(label)}: —</span>`;
+  return `<span>${escapeHtml(label)}: ${escapeHtml(formatDate(event.time))}</span>`;
+}
+
+function eventLabel(key) {
+  return ({
+    mentions_event: "Всплеск упоминаний",
+    price_event: "Всплеск цены",
+    volume_event: "Всплеск объема",
+    oi_event: "Всплеск OI"
+  })[key] || key;
+}
+
+function chartEdgeTime(metrics, edge) {
+  const points = metrics?.indexed_points || [];
+  const point = edge === "first" ? points[0] : points[points.length - 1];
+  return point?.time ? formatDate(point.time) : "";
+}
+
+function chartExplanationText() {
+  return "Все линии нормализованы к шкале 0-100 внутри выбранного окна; это не цена в USDT и не абсолютный объем. Горизонтальная ось — часы. M/P/V отмечают первый значимый всплеск упоминаний, цены и объема.";
+}
+
+function scenarioRu(code) {
+  return ({
+    early_narrative: {
+      label: "Ранний соцсигнал",
+      summary: "Упоминания растут раньше цены и объема. Это сигнал для наблюдения, вход только после подтверждения рынком."
+    },
+    narrative: {
+      label: "Подтвержденный нарратив",
+      summary: "Упоминания пришли первыми, затем цена и объем подтвердили движение."
+    },
+    exhaustion_late_hype: {
+      label: "Поздний хайп",
+      summary: "Цена уже прошла движение, а соцсети догоняют. Риск позднего входа высокий."
+    },
+    fake_pump: {
+      label: "Подозрительный памп",
+      summary: "Цена двинулась без нормального подтверждения объемом и соцсетями."
+    },
+    insider_pump: {
+      label: "Цена раньше соцсетей",
+      summary: "Цена и объем сдвинулись раньше публичного внимания. Нужен ретест, без FOMO."
+    },
+    insufficient_social_data: {
+      label: "Мало соцданных",
+      summary: "LunarCrush не дал достаточную часовую историю; соцблок не повышает уверенность."
+    },
+    insufficient_market_data: {
+      label: "Мало рыночных данных",
+      summary: "Bybit-истории недостаточно для честного сравнения цены, объема и упоминаний."
+    },
+    mixed: {
+      label: "Смешанная картина",
+      summary: "Нет чистого лидерства соцсетей, цены или объема. Нужны дополнительные подтверждения."
+    }
+  })[code || "mixed"] || {
+    label: "Смешанная картина",
+    summary: "Нет чистого лидерства соцсетей, цены или объема. Нужны дополнительные подтверждения."
+  };
 }
 
 function lineChart(chart, kind) {
   const points = chart?.points || [];
   const values = points.map((point) => Number(point?.value)).filter(Number.isFinite);
-  const status = chart?.status || "unavailable";
+  const status = chart?.status || "нет данных";
   if (!points.length || !values.length) {
     return `<section class="mini-chart ${kind}">
       <h3>${escapeHtml(chart?.label || kind)}</h3>
@@ -636,27 +1203,30 @@ function lineChart(chart, kind) {
   </section>`;
 }
 
+function cvdBiasLabel(value) {
+  return ({ positive: "покупатель сильнее", negative: "продавец сильнее", neutral: "нейтрально" })[value] || "нейтрально";
+}
+
 function socialSummary(stage) {
   const metrics = stage?.metrics || {};
   const volumeRows = [
-    ["Social Volume", wholeNumber(metrics.social_volume_current ?? metrics.social_volume_24h)],
-    ["Baseline", wholeNumber(metrics.social_volume_baseline)],
-    ["Previous", wholeNumber(metrics.social_volume_previous)],
-    ["Velocity", velocityRatio(metrics.social_volume_velocity_ratio)],
-    ["Spike", pctFromPercent(metrics.social_volume_velocity_pct)],
+    ["Упоминания", wholeNumber(metrics.social_volume_current ?? metrics.social_volume_24h)],
+    ["База", wholeNumber(metrics.social_volume_baseline)],
+    ["Предыдущее значение", wholeNumber(metrics.social_volume_previous)],
+    ["Скорость", velocityRatio(metrics.social_volume_velocity_ratio)],
+    ["Отклонение", pctFromPercent(metrics.social_volume_velocity_pct)],
     ["Окно", metrics.social_volume_timeframe],
     ["Источник", metrics.social_volume_source || metrics.data_coverage]
   ];
   const contextRows = [
-    ["Темы", metrics.topics],
-    ["Why moved", metrics.why_moved],
-    ["Alerts", metrics.alerts || metrics.supportive_causes],
+    ["Почему заметили", metrics.why_moved],
+    ["Сигналы", metrics.alerts || metrics.supportive_causes],
   ];
   return `<div class="stage-summary social-summary">
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <p>${escapeHtml(stageReason(stage) || "Этап еще не запускался.")}</p>
     <section>
-      <h3>Social Volume Velocity</h3>
+      <h3>Скорость упоминаний</h3>
       ${definitionList(volumeRows)}
     </section>
     <section>
@@ -702,44 +1272,42 @@ function manipulationSummary(stage) {
 function technicalAnalysisSummary(technicalAnalysis, fallbackStrategy) {
   const stage = technicalAnalysis?.stage || {};
   const metrics = technicalAnalysis?.metrics || {};
-  const signals = metrics.signals || {};
-  const signalRows = Object.entries(signals).map(([name, signal]) => [
-    name,
-    `${signal?.status || "нет данных"}: ${signal?.value === null || signal?.value === undefined ? "—" : signal.value}`
-  ]);
+  const decisionTa = metrics.decision_relevant_ta || {};
   const derivatives = metrics.derivatives_filter?.metrics || {};
   const cvd = derivatives.cvd || {};
   const derivativeRows = [
-    ["Status", metrics.derivatives_filter?.status || "unavailable"],
-    ["Funding", pct(derivatives.funding_rate) || "—"],
-    ["Open Interest", money(derivatives.open_interest_value) || metricNumber(derivatives.open_interest)],
-    ["Long / Short", longShort(derivatives.long_ratio, derivatives.short_ratio)],
-    ["L/S source", derivatives.long_short_ratio_status || "unavailable"],
-    ["CVD", cvd.status === "available" ? metricNumber(cvd.cvd_base) : (cvd.status || "unavailable")],
-    ["CVD source", cvd.source || "bybit_recent_trade"]
+    ["Фандинг", pct(derivatives.funding_rate) || "—"],
+    ["Лонги / шорты", longShort(derivatives.long_ratio, derivatives.short_ratio)],
+    ["CVD", cvd.status === "available" ? metricNumber(cvd.cvd_base) : "нет данных"]
   ];
   const execution = metrics.execution_context || {};
   return `<div class="stage-summary technical-summary">
     <span class="badge ${stage.status || "skipped"}">${stageResultLabel(stage)}</span>
     <p>${escapeHtml(metrics.principle || "Derivatives/market metrics определяют что торговать; ТА определяет когда и где входить.")}</p>
     <section>
-      <h3>Идентификатор стратегии</h3>
-      <p><strong>${escapeHtml(metrics.strategy_identifier || metrics.strategy_models?.selected || fallbackStrategy || "unknown")}</strong></p>
-    </section>
-    <section>
-      <h3>Derivatives filter</h3>
+      <h3>Рыночные подтверждения</h3>
       ${definitionList(derivativeRows)}
     </section>
     <section>
-      <h3>TA signals</h3>
-      ${definitionList(signalRows.length ? signalRows : [["status", "insufficient_data"]])}
+      <h3>Сигналы ТА</h3>
+      ${decisionTa.summary ? `<p>${escapeHtml(decisionTa.summary)}</p>` : ""}
+      ${decisionTa.positives || decisionTa.negatives ? `<div class="split-grid">
+        <div>
+          <h4>Поддерживает</h4>
+          ${weightedSignalList(decisionTa.positives)}
+        </div>
+        <div>
+          <h4>Мешает</h4>
+          ${weightedSignalList(decisionTa.negatives)}
+        </div>
+      </div>` : ""}
     </section>
     <section>
       <h3>Исполнение</h3>
       ${definitionList([
-        ["Вход", execution.entry_basis || "TA confirmation"],
-        ["Stop-loss", execution.stop_loss_basis || "ATR / structure"],
-        ["Take-profit", execution.take_profit_basis || "structure / liquidity"]
+        ["Вход", execution.entry_basis || "Подтверждение ТА"],
+        ["Стоп", execution.stop_loss_basis || "ATR / структура"],
+        ["Цели", execution.take_profit_basis || "структура / ликвидность"]
       ])}
     </section>
   </div>`;
@@ -783,51 +1351,57 @@ function skippedBecauseOfBlockingStage(stage, blockingStage) {
 
 function fundamentalSummary(stage) {
   const metrics = stage?.metrics || {};
-  const githubRepos = Array.isArray(metrics.github_repos) ? metrics.github_repos.join(", ") : metrics.github_repos;
-  const identityRows = [
-    ["Название", metrics.name],
-    ["Категория", metrics.sector],
-    ["Chain / ecosystem", metrics.chain_ecosystem],
-    ["Contract", metrics.contract_address],
-    ["Homepage", metrics.homepage_url],
-    ["Whitepaper", metrics.whitepaper_url],
-    ["X / Twitter", metrics.twitter_screen_name ? `@${metrics.twitter_screen_name}` : ""],
-    ["Telegram", metrics.telegram_channel_identifier],
-    ["Subreddit", metrics.subreddit_url],
-    ["GitHub", githubRepos],
-  ];
+  const split = fundamentalSplit(metrics);
   const sizeRows = [
-    ["FDV tier", metrics.fdv_tier_label || metrics.market_cap_tier_label || "FDV: нет данных"],
+    ["FDV", metrics.fdv_tier_label || metrics.market_cap_tier_label || "нет данных"],
     ["FDV", money(metrics.fdv) || "—"],
-    ["Market cap", money(metrics.market_cap) || "—"],
+    ["Капитализация", money(metrics.market_cap) || "—"],
     ["MC / FDV", ratioPct(metrics.market_cap_to_fdv_ratio) || "—"],
-    ["Supply profile", metrics.market_cap_to_fdv_label],
-    ["Объем / Market cap", ratioPct(metrics.volume_to_market_cap) || "—"],
-    ["Цена 24ч", pctFromPercent(metrics.price_change_24h)],
-    ["Цена 7д", pctFromPercent(metrics.price_change_7d)]
+    ["Supply", metrics.market_cap_to_fdv_label]
   ];
   return `<div class="stage-summary fundamental-summary">
     <span class="badge ${stage?.status || "skipped"}">${stageResultLabel(stage)}</span>
     <div class="fundamental-card">
       <section>
-        <h3>Кто перед нами</h3>
-        <p>${escapeHtml(metrics.project_brief_ru || metrics.project_summary || "Данных пока нет.")}</p>
-        ${definitionList(identityRows)}
+        <h3>Описание проекта</h3>
+        <p>${escapeHtml(stripProjectTaxonomy(metrics.project_brief_ru || metrics.project_summary || "Данных пока нет."))}</p>
+      </section>
+      <section>
+        <h3>Ограничения</h3>
+        ${bulletList(split.hardBlockers.length ? split.hardBlockers : ["Критичных блокеров нет."])}
       </section>
       <section>
         <h3>Размер и supply</h3>
         ${definitionList(sizeRows)}
-        ${metrics.fdv_tier_reason ? `<p>${escapeHtml(metrics.fdv_tier_reason)}</p>` : ""}
-        ${metrics.market_cap_to_fdv_reason ? `<p>${escapeHtml(metrics.market_cap_to_fdv_reason)}</p>` : ""}
-      </section>
-      <section>
-        <h3>Почему могло двигаться</h3>
-        <p><strong>${escapeHtml(metrics.fundamental_label || "Недостаточно данных")}</strong></p>
-        ${metrics.fundamental_label_reason ? `<p>${escapeHtml(metrics.fundamental_label_reason)}</p>` : ""}
-        ${bulletList(cleanList(metrics.movement_type_reasons).length ? metrics.movement_type_reasons : metrics.movement_supportive_ru)}
       </section>
     </div>
   </div>`;
+}
+
+function fundamentalSplit(metrics) {
+  const hardBlockers = [];
+  const unlock = String(metrics.unlock_risk_label || "");
+  if (unlock.toLowerCase().includes("есть")) hardBlockers.push("Unlock/vesting упоминается публично: нужна ручная проверка даты и размера.");
+  if (Number(metrics.tokenomics_risk_score) >= 65) hardBlockers.push("Tokenomics risk высокий.");
+  if (Number(metrics.circulating_supply_ratio) < 0.30) hardBlockers.push("Циркуляция ниже 30% от общего или максимального предложения.");
+  if (["tiny", "giant"].includes(String(metrics.fdv_tier || ""))) hardBlockers.push(`Extreme FDV tier: ${metrics.fdv_tier_label || metrics.fdv_tier}.`);
+  cleanList(metrics.red_flags).forEach((flag) => {
+    const lowered = flag.toLowerCase();
+    if (["scam", "rug", "blacklist"].some((term) => lowered.includes(term))) hardBlockers.push(flag);
+  });
+  const categories = Array.isArray(metrics.categories) ? metrics.categories.slice(0, 5).join(", ") : metrics.categories;
+  const contextOnly = [
+    metrics.sector ? `Sector: ${metrics.sector}` : "",
+    metrics.chain_ecosystem ? `Chain/ecosystem: ${metrics.chain_ecosystem}` : "",
+    categories ? `Categories: ${categories}` : "",
+    metrics.project_brief_ru || metrics.project_summary || ""
+  ].filter(Boolean);
+  return { hardBlockers, contextOnly };
+}
+
+function weightedSignalList(items) {
+  const rows = (items || []).map((item) => `<li><strong>${escapeHtml(item.label || item.key)}</strong>: вес ${metricNumber(item.weight)}</li>`).join("");
+  return `<ul class="weighted-list">${rows || "<li>Нет сильных торговых сигналов.</li>"}</ul>`;
 }
 
 function bulletList(items) {
@@ -1194,11 +1768,43 @@ function velocityRatio(value) {
   return `${number.toFixed(2)}x`;
 }
 
+function velocityLevel(value) {
+  if (value === null || value === undefined || value === "") return "нет данных";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "нет данных";
+  if (number >= 1.75) return "высокая";
+  if (number >= 1.05) return "умеренная";
+  return "низкая";
+}
+
+function cvdBiasFromValue(value) {
+  if (value === null || value === undefined || value === "") return "unknown";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "unknown";
+  if (number > 0) return "positive";
+  if (number < 0) return "negative";
+  return "neutral";
+}
+
+function cvdMetricLabel(value, bias = cvdBiasFromValue(value)) {
+  if (value === null || value === undefined || value === "" || bias === "unknown") return "CVD: нет данных";
+  if (bias === "positive") return "CVD: покупатели давят";
+  if (bias === "negative") return "CVD: продавцы давят";
+  return "CVD: нейтрально";
+}
+
+function cvdMetricNote(value, bias = cvdBiasFromValue(value)) {
+  if (value === null || value === undefined || value === "" || bias === "unknown") {
+    return "CVD — баланс рыночных покупок и продаж; источник не вернул значение.";
+  }
+  return `Баланс рыночных покупок и продаж: ${metricNumber(value)}.`;
+}
+
 function stageLabel(stage) {
   return ({
     market_scan: "Волатильность",
     initial_selection: "Первичный отбор",
-    research_charts: "Social/Price/Volume",
+    research_charts: "Social Intelligence",
     fundamentals: "Фундаментал",
     social_filter: "Соцфильтр",
     manipulation_detector: "Манипуляторы",

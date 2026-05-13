@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from hype_radar.engine import HypeRadarEngine, ScanConfig, _manipulation_status
 from hype_radar.models import Candle, CvdStats, Instrument, LongShortRatio, OrderbookStats, Ticker
-from hype_radar.storage import RadarStore, _summary, _why_it_moved, lifecycle_label, manipulation_level
+from hype_radar.storage import RadarStore, _research_card, _summary, _why_it_moved, lifecycle_label, manipulation_level
 from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
@@ -299,6 +299,38 @@ class PipelineTests(unittest.TestCase):
         manipulation = [stage for stage in researched.stages if stage.stage == "manipulation_detector"][0]
         self.assertEqual(fundamentals.metrics["circulating_supply_warn_threshold"], 0.30)
         self.assertNotIn("blacklist_risk_score", manipulation.metrics)
+
+    def test_research_card_has_compact_decision_layer(self):
+        payload = token_payload("DROP", coin_id="drop-token", circ=20, total=100, market_cap=10_000_000, fdv=120_000_000, volume=200_000)
+        intelligence = FakeTokenIntelligence({"DROP": payload})
+        researched = HypeRadarEngine(
+            bybit=FakeBybit(),
+            token_intelligence=intelligence,
+        ).research_symbol("DROPUSDT", ScanConfig(top=1, min_turnover_24h=1_000_000, workers=1))
+
+        card = _research_card(researched.to_dict())
+        decision = card["decision_layer"]
+
+        self.assertEqual(decision["verdict"], researched.final_verdict)
+        self.assertIn("no_trade_reason", decision)
+        self.assertGreaterEqual(len(decision["activation_triggers"]), 1)
+        self.assertEqual(decision["derivatives"]["cvd_status"], "available")
+        self.assertIn("циркуляция", " ".join(decision["fundamentals"]["hard_blockers"]).lower())
+        self.assertIn("decision_score", decision["ta"])
+        self.assertIn("decision_relevant_ta", card["technical_analysis"]["metrics"])
+        self.assertIn("blocks", decision)
+        self.assertIn("final_decision", decision)
+        self.assertEqual(set(decision["blocks"].keys()), {"project", "fundamental", "social", "ta"})
+        self.assertIn("cvd_summary", decision["blocks"]["project"])
+        self.assertIn(decision["blocks"]["fundamental"]["verdict"], {"ok", "risk", "blocker"})
+        self.assertNotEqual(decision["blocks"]["fundamental"]["verdict_label"], "Блокер")
+        self.assertIn("tag", decision["blocks"]["fundamental"])
+        self.assertIn("scenario_label_ru", decision["blocks"]["social"])
+        self.assertIn("velocity_level", decision["blocks"]["social"])
+        self.assertNotIn("cvd_note", decision["blocks"]["social"])
+        self.assertIn("entry_conditions", decision["blocks"]["ta"])
+        self.assertIn("tag", decision["blocks"]["ta"])
+        self.assertNotIn("Watch only", decision["verdict_label"])
 
     def test_coingecko_identity_prefers_exact_symbol_over_rank(self):
         identity = select_coingecko_identity(

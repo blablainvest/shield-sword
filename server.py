@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 from hype_radar.engine import HypeRadarEngine, ScanConfig
 from hype_radar.storage import RadarStore
@@ -30,6 +31,8 @@ def app(environ: Dict[str, Any], start_response: Callable[..., Any]) -> Iterable
             return _scan_run(query, start_response)
         if method == "POST" and path == "/api/research/run":
             return _research_run(query, start_response)
+        if method == "POST" and path == "/api/search/run":
+            return _search_run(query, start_response)
         if method in {"GET", "HEAD"}:
             return _static(path, start_response, include_body=method == "GET")
         return _json({"error": "Not found"}, start_response, HTTPStatus.NOT_FOUND)
@@ -93,6 +96,29 @@ def _research_run(query: Dict[str, Any], start_response: Callable[..., Any]) -> 
     symbol = _optional_first(query, "symbol")
     if not symbol:
         return _json({"error": "Missing symbol."}, start_response, HTTPStatus.BAD_REQUEST)
+    try:
+        symbol = normalize_symbol_from_query(symbol)
+    except ValueError as exc:
+        return _json({"error": str(exc)}, start_response, HTTPStatus.BAD_REQUEST)
+    return _run_symbol_research(symbol, query, start_response)
+
+
+def _search_run(query: Dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
+    value = _optional_first(query, "query") or _optional_first(query, "input") or _optional_first(query, "url")
+    if not value:
+        return _json({"error": "Введите тикер или ссылку Bybit."}, start_response, HTTPStatus.BAD_REQUEST)
+    try:
+        symbol = normalize_symbol_from_query(value)
+    except ValueError as exc:
+        return _json({"error": str(exc)}, start_response, HTTPStatus.BAD_REQUEST)
+    return _run_symbol_research(symbol, query, start_response)
+
+
+def _run_symbol_research(
+    symbol: str,
+    query: Dict[str, Any],
+    start_response: Callable[..., Any],
+) -> Iterable[bytes]:
     config = ScanConfig(
         top=1,
         max_symbols=1,
@@ -163,3 +189,54 @@ def _int_query(query: Dict[str, Any], key: str, default: int) -> int:
 
 def _volume_query(query: Dict[str, Any]) -> float:
     return float(_first(query, "min_volume", _first(query, "min_turnover", "2000000")))
+
+
+def normalize_symbol_from_query(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Введите тикер или ссылку Bybit.")
+
+    parsed = urlparse(text)
+    token = _symbol_from_bybit_url(parsed) if parsed.scheme or parsed.netloc else text
+    symbol = _normalize_symbol_token(token)
+    if not symbol:
+        raise ValueError("Некорректный тикер. Используйте Bybit linear USDT тикер, например BTCUSDT или BTC.")
+    return symbol
+
+
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,30}$")
+_KNOWN_NON_USDT_QUOTES = ("USDC", "USD", "EUR", "TRY")
+
+
+def _symbol_from_bybit_url(parsed: Any) -> str:
+    host = parsed.netloc.lower()
+    if host and host != "bybit.com" and not host.endswith(".bybit.com"):
+        raise ValueError("Поддерживаются только ссылки Bybit trade.")
+
+    candidates = []
+    parts = [unquote(part).strip() for part in parsed.path.split("/") if part.strip()]
+    lowered = [part.lower() for part in parts]
+    for index, part in enumerate(lowered[:-1]):
+        if part == "usdt":
+            candidates.append(parts[index + 1])
+    candidates.extend(part for part in parts if part.upper().endswith("USDT"))
+    query = parse_qs(parsed.query)
+    for key in ("symbol", "contract", "pair"):
+        candidates.extend(query.get(key, []))
+
+    for candidate in candidates:
+        normalized = _normalize_symbol_token(candidate)
+        if normalized:
+            return normalized
+    raise ValueError("Не удалось найти USDT тикер в ссылке Bybit.")
+
+
+def _normalize_symbol_token(value: str) -> str:
+    token = str(value or "").strip().upper()
+    if not _SYMBOL_RE.fullmatch(token):
+        return ""
+    if token.endswith("USDT"):
+        return token if len(token) > 4 else ""
+    if token.endswith(_KNOWN_NON_USDT_QUOTES):
+        return ""
+    return f"{token}USDT"

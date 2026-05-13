@@ -77,7 +77,9 @@ class OpenAiTextNormalizer:
                     "CoinGecko-категории и platforms являются источником истины для сектора/экосистемы; "
                     "LunarCrush topics описывают только соцтему и не должны подменять экосистему проекта. "
                     "Верни только валидный JSON с ключами: project_brief_ru, top_posts_ru, "
-                    "movement_supportive_ru, movement_suspicious_ru. project_brief_ru должен быть до 500 символов. "
+                    "top_posts_summary_ru, movement_supportive_ru, movement_suspicious_ru. "
+                    "project_brief_ru должен быть до 500 символов. "
+                    "top_posts_summary_ru должен быть 300-500 символов: членораздельный русский вывод о том, о чем топ-посты. "
                     "Пункты списков должны быть короткими и читабельными на русском."
                 ),
             },
@@ -482,6 +484,8 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     movement_supportive_ru = normalized_list(normalized.get("movement_supportive_ru"), supporting_factors, max_items=6)
     movement_suspicious_ru = normalized_list(normalized.get("movement_suspicious_ru"), suspicious_factors, max_items=6)
     top_posts_ru = normalized_list(normalized.get("top_posts_ru"), lunar_metrics.get("top_posts") or [], max_items=5)
+    top_posts_summary_source = normalized.get("top_posts_summary_ru") or fallback_top_posts_summary(top_posts_ru)
+    top_posts_summary_ru = compact_ui_text(top_posts_summary_source, 500) if top_posts_summary_source else ""
     movement_type_reasons = movement_type_reasons_for(circ_ratio, volume_to_market_cap, trend, lunar_metrics, tokenomics_risk)
     thesis = build_fundamental_thesis(project_brief, trend, movement_supportive_ru, movement_suspicious_ru)
     return {
@@ -529,6 +533,7 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "social_interactions_24h": lunar_metrics.get("social_interactions_24h"),
         "top_posts": lunar_metrics.get("top_posts"),
         "top_posts_ru": top_posts_ru,
+        "top_posts_summary_ru": top_posts_summary_ru,
         "movement_supportive": supporting_factors[:8],
         "movement_supportive_ru": movement_supportive_ru,
         "movement_suspicious": suspicious_factors[:8],
@@ -1197,6 +1202,14 @@ def fallback_project_brief(project_summary: Optional[str]) -> str:
         return "Данных пока нет."
     first_sentence = re.split(r"(?<=[.!?])\s+", project_summary.strip())[0]
     return compact_ui_text(first_sentence, 500)
+
+
+def fallback_top_posts_summary(top_posts_ru: List[str]) -> str:
+    posts = [clean_text(str(item)) for item in (top_posts_ru or []) if clean_text(str(item))]
+    if not posts:
+        return ""
+    joined = " ".join(posts[:3])
+    return compact_ui_text("Топ-посты обсуждают: %s" % joined, 500)
 
 
 def normalized_list(translated: Any, fallback: Any, max_items: int = 6) -> List[str]:
