@@ -372,7 +372,7 @@ def _research_card(payload: Dict[str, Any]) -> Dict[str, Any]:
             "ta_short": scores.get("ta_short"),
         }
     )
-    technical_metrics["decision_relevant_ta"] = _ta_decision_layer(final, _preferred_side(final)) if final else {}
+    technical_metrics["decision_relevant_ta"] = _ta_decision_layer(final, _preferred_side(final, fundamentals, research_charts, {})) if final else {}
     return {
         "run_id": None,
         "symbol": payload.get("symbol"),
@@ -507,7 +507,8 @@ def _decision_layer(
         }
 
     verdict = str(final.get("verdict") or "WATCH_ONLY")
-    preferred_side = _preferred_side(final)
+    derivatives = _derivatives_decision_layer(final, "neutral")
+    preferred_side = _preferred_side(final, fundamentals, research_charts, derivatives)
     no_trade_reason = _no_trade_reason(final, fundamentals, sentiment, manipulation)
     derivatives = _derivatives_decision_layer(final, preferred_side)
     ta = _ta_decision_layer(final, preferred_side)
@@ -543,13 +544,32 @@ def _decision_layer(
     }
 
 
-def _preferred_side(final: Dict[str, Any]) -> str:
-    direction = str(final.get("direction_bias") or "").upper()
-    if direction in {"LONG", "SHORT"}:
-        return direction.lower()
+def _preferred_side(
+    final: Dict[str, Any],
+    fundamentals: Optional[Dict[str, Any]] = None,
+    research_charts: Optional[Dict[str, Any]] = None,
+    derivatives: Optional[Dict[str, Any]] = None,
+) -> str:
     long_score = _number(final.get("long_score"))
     short_score = _number(final.get("short_score"))
-    return "short" if short_score is not None and long_score is not None and short_score > long_score else "long"
+    if long_score is not None and short_score is not None and abs(short_score - long_score) >= 3.0:
+        return "short" if short_score > long_score else "long"
+
+    scenario = (((research_charts or {}).get("metrics") or {}).get("scenario") or {}).get("code")
+    has_fundamental_risk = bool(_fundamental_hard_blockers(((fundamentals or {}).get("metrics") or {})))
+    cvd_bias = (derivatives or {}).get("cvd_bias")
+    if has_fundamental_risk and scenario in {"fake_pump", "exhaustion_late_hype", "insider_pump"} and cvd_bias == "negative":
+        return "short"
+    if scenario in {"narrative", "early_narrative"} and cvd_bias == "positive" and not has_fundamental_risk:
+        return "long"
+
+    direction = str(final.get("direction_bias") or "").upper()
+    verdict = str(final.get("verdict") or "").upper()
+    if verdict in {"LONG_ENTER", "LONG_WAIT_PULLBACK"} or direction == "LONG" and verdict != "WATCH_ONLY":
+        return "long"
+    if verdict in {"SHORT_ENTER", "SHORT_WATCH"} or direction == "SHORT" and verdict != "WATCH_ONLY":
+        return "short"
+    return "neutral"
 
 
 def _verdict_label(verdict: str) -> str:
@@ -691,7 +711,7 @@ def _final_decision_payload(
     triggers: List[str],
     trade_plan: Dict[str, Any],
 ) -> Dict[str, Any]:
-    side = preferred_side if verdict in {"LONG_ENTER", "LONG_WAIT_PULLBACK", "SHORT_ENTER", "SHORT_WATCH"} else "watch_only"
+    side = preferred_side if preferred_side in {"long", "short"} and verdict not in {"AVOID", "NO_SCORE"} else "watch_only"
     return {
         "action": _verdict_label(verdict),
         "side": side,
@@ -732,7 +752,7 @@ def _project_tag(metrics: Dict[str, Any], verdict: str) -> str:
         return "Не торговать"
     blockers = _fundamental_hard_blockers(metrics)
     if blockers:
-        return "Блокирующий риск"
+        return "Сильный риск"
     tier = str(metrics.get("fdv_tier") or "")
     if tier in {"tiny", "small"}:
         return "Малая капитализация"
@@ -792,18 +812,18 @@ def _fundamental_trade_block(stage: Dict[str, Any]) -> Dict[str, Any]:
     blockers = _fundamental_hard_blockers(metrics)
     if any(_hard_blocker_is_critical(item) for item in blockers):
         verdict = "blocker"
-        trade_impact = "Не открывать сделку, пока блокер не проверен вручную."
+        trade_impact = ""
     elif blockers or str(stage.get("status") or "") == "warn":
         verdict = "risk"
-        trade_impact = "Фундаментал снижает размер позиции и требует подтверждения рынком."
+        trade_impact = ""
     else:
         verdict = "ok"
-        trade_impact = "Фундаментал не мешает сделке, но сам по себе не является сигналом входа."
+        trade_impact = ""
     return {
         "verdict": verdict,
-        "verdict_label": {"ok": "ОК", "risk": "Риск", "blocker": "Блокирующий риск"}[verdict],
+        "verdict_label": {"ok": "Слабый риск", "risk": "Средний риск", "blocker": "Сильный риск"}[verdict],
         "tag": _fundamental_tag(metrics, blockers, verdict),
-        "status_help": "Блокирующий риск — фактор, из-за которого сделку не открываем без ручной проверки." if verdict == "blocker" else "",
+        "status_help": "",
         "summary": metrics.get("project_brief_ru") or metrics.get("project_summary") or "Описание проекта пока недоступно.",
         "blockers": blockers,
         "reasons": _fundamental_reasons(metrics, blockers, verdict),
@@ -813,16 +833,16 @@ def _fundamental_trade_block(stage: Dict[str, Any]) -> Dict[str, Any]:
 
 def _fundamental_tag(metrics: Dict[str, Any], blockers: List[str], verdict: str) -> str:
     if verdict == "blocker":
-        return "Блокирующий риск"
+        return "Сильный риск"
     if blockers:
-        return "Риск supply"
+        return "Средний риск"
     tier = str(metrics.get("fdv_tier") or "")
     if tier in {"tiny", "small"}:
         return "Малая капитализация"
     sector = str(metrics.get("sector") or metrics.get("narrative") or "").strip()
     if sector:
         return "%s-сектор" % sector.split()[0]
-    return "Фундаментал без красных флагов" if verdict == "ok" else "Спекулятивный риск"
+    return "Слабый риск" if verdict == "ok" else "Средний риск"
 
 
 def _fundamental_reasons(metrics: Dict[str, Any], blockers: List[str], verdict: str) -> List[str]:
@@ -901,7 +921,7 @@ def _ta_decision_layer(final: Dict[str, Any], preferred_side: str) -> Dict[str, 
             add(negatives, "divergence", "Медвежья дивергенция RSI", 18)
         if volume_spike is not True:
             add(negatives, "volume", "Нет подтверждения объемом", 14)
-    else:
+    elif preferred_side == "short":
         if structure == "bearish_break":
             add(positives, "structure", "Медвежий слом структуры", 30)
         if divergence == "bearish":
@@ -914,6 +934,9 @@ def _ta_decision_layer(final: Dict[str, Any], preferred_side: str) -> Dict[str, 
             add(negatives, "structure", "Бычья структура конфликтует с шортом", 30)
         if ema in {"bullish_cross", "bullish"} and structure != "bearish_break":
             add(negatives, "ema", "EMA еще бычья; для шорта нужен сильный слом структуры или CVD", 10)
+    else:
+        if volume_spike is not True:
+            add(negatives, "volume", "Нет подтверждения объемом", 14)
 
     if atr is True:
         add(positives, "atr", "ATR расширяется: волатильность есть, но направление нужно подтверждать", 8)
@@ -1005,17 +1028,20 @@ def _ta_entry_conditions(preferred_side: str, derivatives: Dict[str, Any]) -> Li
         conditions.append("Дождаться lower-high или слома локальной структуры вниз.")
         if cvd is None or cvd >= 0:
             conditions.append("CVD должен стать отрицательным: продавец должен реально давить рынок.")
-    else:
+    elif preferred_side == "long":
         conditions.append("Дождаться возврата/ретеста уровня без провала структуры.")
         if cvd is None or cvd <= 0:
             conditions.append("CVD должен стать положительным: покупатель должен подтвердить движение.")
+    else:
+        conditions.append("Сначала выбрать сторону: дождаться либо lower-high/слома вниз, либо возврата структуры вверх.")
+        conditions.append("CVD и объем должны подтвердить выбранное направление.")
     return conditions
 
 
 def _chart_next_step(stage: Dict[str, Any], final: Dict[str, Any]) -> str:
     scenario = ((stage.get("metrics") or {}).get("scenario") or {})
     code = scenario.get("code")
-    preferred_side = _preferred_side(final) if final else "long"
+    preferred_side = _preferred_side(final, {}, stage, {}) if final else "neutral"
     if code in {"narrative", "organic_growth", "strong_signal"}:
         return "Соцсигнал ведет рынок: ждать объем Bybit выше 2.0x к базе и CVD в сторону %s." % _side_label(preferred_side)
     if code in {"fake_pump", "exhaustion_late_hype"}:

@@ -350,14 +350,9 @@ function searchResearchCardHtml(card) {
   const project = blocks.project || fallbackProjectBlock(card, decision);
   return `<article class="search-result-card">
     <section class="search-hero project-card-block">
-      <div>
+      <div class="project-head">
         <time>${formatDate(card.created_at)}</time>
         <h2>${escapeHtml(card.symbol || "")}</h2>
-        <div class="tag-row">
-          <span class="section-tag">${escapeHtml(project.tag || "Карточка проекта")}</span>
-          <span class="section-tag muted">${escapeHtml(project.cvd_summary?.label || cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias))}</span>
-        </div>
-        <p>${escapeHtml(project.project_one_liner || decision.final_decision?.no_trade_reason || decision.action || "Пайплайн завершен без итогового резюме.")}</p>
       </div>
       <div class="search-hero-side">
         <span class="verdict-badge ${decisionClass(decision.verdict || project.status)}">${escapeHtml(project.status_label || decision.final_decision?.action || decision.verdict_label || "Наблюдать")}</span>
@@ -374,7 +369,7 @@ function searchResearchCardHtml(card) {
       ${quickMetric("Изм. цены", pct(metrics.price_change_pct), `${metrics.window_hours}ч`, metrics.price_change_pct)}
       ${quickMetric("Изм. объема", pct(metrics.volume_change_pct), `${metrics.window_hours}ч`, metrics.volume_change_pct, { omitIfMissing: true })}
       ${quickMetric("Объем 24ч", money(metrics.turnover_24h), "Bybit", metrics.turnover_24h)}
-      ${quickMetric("Фандинг", pct(metrics.funding_rate), "бессрочный контракт", metrics.funding_rate)}
+      ${quickMetric("Фандинг", pct(metrics.funding_rate), fundingLevel(metrics.funding_rate), metrics.funding_rate)}
       ${quickMetric("Лонги / шорты", longShort(metrics.long_ratio, metrics.short_ratio), "соотношение позиций", metrics.long_ratio ?? metrics.short_ratio)}
       ${quickMetric("CVD", cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias), "баланс покупок и продаж", metrics.cvd_value)}
     </section>
@@ -466,8 +461,8 @@ function fallbackFundamentalBlock(stage) {
   const split = fundamentalSplit(metrics);
   return {
     verdict: split.hardBlockers.length ? "risk" : "ok",
-    verdict_label: split.hardBlockers.length ? "Риск" : "ОК",
-    tag: split.hardBlockers.length ? "Риск supply" : "Фундаментал без красных флагов",
+    verdict_label: split.hardBlockers.length ? "Средний риск" : "Слабый риск",
+    tag: split.hardBlockers.length ? "Средний риск" : "Слабый риск",
     status_help: "",
     summary: metrics.project_brief_ru || metrics.project_summary || "Описание проекта пока недоступно.",
     blockers: split.hardBlockers,
@@ -528,22 +523,42 @@ function fundamentalDecisionBlock(block, stage) {
   const data = block || fallbackFundamentalBlock(stage);
   const metrics = stage?.metrics || {};
   const reasons = data.reasons?.length ? data.reasons : data.blockers?.slice(0, 2);
-  const label = data.verdict_label === "Блокер" ? "Блокирующий риск" : data.verdict_label;
-  const statusHelp = data.status_help || (data.verdict === "blocker" ? "Блокирующий риск — фактор, из-за которого сделку не открываем без ручной проверки." : "");
+  const label = fundamentalRiskLabel(data);
   return `<article class="decision-card fundamental">
     <div class="decision-card-head">
       <h2>Фундаментал</h2>
-      <span class="badge ${decisionBadgeClass(data.verdict)}">${escapeHtml(label || "ОК")}</span>
     </div>
-    <div class="tag-row"><span class="section-tag">${escapeHtml(data.tag || label || "Фундаментал")}</span></div>
-    ${statusHelp ? `<p class="microcopy">${escapeHtml(statusHelp)}</p>` : ""}
+    <div class="tag-row"><span class="section-tag">${escapeHtml(label || "Фундаментал")}</span></div>
+    ${fundamentalProjectDescription(data, metrics)}
     ${fundamentalMarketSnapshot(metrics)}
     <section>
       <h3>Причины</h3>
       ${bulletList(reasons?.length ? reasons : ["Критичных фундаментальных ограничений не найдено."])}
     </section>
-    <p class="trade-impact">${escapeHtml(cleanTradeCopy(data.trade_impact || ""))}</p>
   </article>`;
+}
+
+function fundamentalRiskLabel(data) {
+  const tag = normalizeRiskTag(data.tag);
+  if (tag && ["Слабый риск", "Средний риск", "Сильный риск"].includes(tag)) return tag;
+  if (data.verdict === "blocker" || data.verdict_label === "Блокирующий риск" || data.verdict_label === "Блокер") return "Сильный риск";
+  if (data.verdict === "risk") return "Средний риск";
+  return data.verdict_label || "Слабый риск";
+}
+
+function normalizeRiskTag(tag) {
+  if (tag === "Блокирующий риск" || tag === "Блокер" || tag === "Риск supply") return "Сильный риск";
+  if (tag === "Спекулятивный риск") return "Средний риск";
+  return tag;
+}
+
+function fundamentalProjectDescription(data, metrics) {
+  const text = stripProjectTaxonomy(data.summary || metrics.project_brief_ru || metrics.project_summary || "");
+  if (!text || text === "Описание проекта пока недоступно.") return "";
+  return `<section class="fundamental-description">
+    <h3>Описание проекта</h3>
+    <p>${escapeHtml(text)}</p>
+  </section>`;
 }
 
 function fundamentalMarketSnapshot(metrics) {
@@ -567,7 +582,6 @@ function socialDecisionBlock(block, chartsStage, sentiment) {
   return `<article class="decision-card social">
     <div class="decision-card-head">
       <h2>Social Intelligence</h2>
-      <span class="badge ${decisionBadgeClass(data.verdict)}">${escapeHtml(data.verdict_label || "Наблюдать")}</span>
     </div>
     <div class="tag-row"><span class="section-tag social-tag">${escapeHtml(data.tag || data.scenario_label_ru || "Смешанная картина")}</span></div>
     <section>
@@ -578,7 +592,6 @@ function socialDecisionBlock(block, chartsStage, sentiment) {
     ${researchChartsSummary(chartsStage)}
     ${data.top_posts_summary_ru ? `<section><h3>Вывод по топ-постам</h3><p>${escapeHtml(data.top_posts_summary_ru)}</p></section>` : ""}
     ${posts.length ? `<section><h3>Топ-посты LunarCrush</h3>${numberedList(posts)}</section>` : ""}
-    <p class="trade-impact">${escapeHtml(data.trade_impact || "Ждать подтверждения рынком.")}</p>
   </article>`;
 }
 
@@ -587,7 +600,6 @@ function taDecisionBlock(block, technicalAnalysis) {
   return `<article class="decision-card ta">
     <div class="decision-card-head">
       <h2>ТА</h2>
-      <span class="badge ${decisionBadgeClass(data.verdict)}">${escapeHtml(data.verdict_label || "Нет подтверждения")}</span>
     </div>
     <div class="tag-row"><span class="section-tag ta-tag">${escapeHtml(data.tag || data.strategy_label || "Торговая стратегия")}</span></div>
     <p>${escapeHtml(data.summary || "")}</p>
@@ -598,7 +610,6 @@ function taDecisionBlock(block, technicalAnalysis) {
       <h3>Условия входа</h3>
       ${bulletList(data.entry_conditions || [])}
     </section>
-    <p class="trade-impact">${escapeHtml(data.trade_impact || "")}</p>
     <details class="term-details">
       <summary>Расшифровка терминов</summary>
       ${bulletList(data.terms || [])}
@@ -658,7 +669,7 @@ function numberedList(items) {
 }
 
 function russianPostList(items) {
-  return (items || []).filter((item) => /[А-Яа-яЁё]/.test(String(item || ""))).slice(0, 5);
+  return (items || []).filter((item) => /[А-Яа-яЁё]/.test(String(item || ""))).slice(0, 3);
 }
 
 function timeframeLabel(value) {
@@ -796,7 +807,7 @@ function researchCardHtml(card) {
   const stages = pipeline.stages || [];
   const decision = normalizedDecisionLayer(card);
   const blocks = decision.blocks || {};
-  const tags = [blocks.project?.tag, blocks.fundamental?.tag, blocks.social?.tag || blocks.social?.scenario_label_ru, blocks.ta?.tag]
+  const tags = [normalizeRiskTag(blocks.project?.tag), normalizeRiskTag(blocks.fundamental?.tag), blocks.social?.tag || blocks.social?.scenario_label_ru, blocks.ta?.tag]
     .filter(Boolean)
     .slice(0, 4);
   return `<article class="pipeline-card" data-symbol="${card.symbol}" data-run-id="${card.run_id || ""}" data-research-id="${card.research_id || ""}">
@@ -1775,6 +1786,15 @@ function velocityLevel(value) {
   if (number >= 1.75) return "высокая";
   if (number >= 1.05) return "умеренная";
   return "низкая";
+}
+
+function fundingLevel(value) {
+  if (value === null || value === undefined || value === "") return "нет данных";
+  const number = Math.abs(Number(value));
+  if (!Number.isFinite(number)) return "нет данных";
+  if (number < 0.0001) return "низкий";
+  if (number <= 0.0005) return "средний";
+  return "высокий";
 }
 
 function cvdBiasFromValue(value) {

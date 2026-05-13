@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from hype_radar.engine import HypeRadarEngine, ScanConfig, _manipulation_status
 from hype_radar.models import Candle, CvdStats, Instrument, LongShortRatio, OrderbookStats, Ticker
-from hype_radar.storage import RadarStore, _research_card, _summary, _why_it_moved, lifecycle_label, manipulation_level
+from hype_radar.storage import RadarStore, _preferred_side, _research_card, _summary, _why_it_moved, lifecycle_label, manipulation_level
 from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
@@ -324,6 +324,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("cvd_summary", decision["blocks"]["project"])
         self.assertIn(decision["blocks"]["fundamental"]["verdict"], {"ok", "risk", "blocker"})
         self.assertNotEqual(decision["blocks"]["fundamental"]["verdict_label"], "Блокер")
+        self.assertIn(decision["blocks"]["fundamental"]["verdict_label"], {"Слабый риск", "Средний риск", "Сильный риск"})
         self.assertIn("tag", decision["blocks"]["fundamental"])
         self.assertIn("scenario_label_ru", decision["blocks"]["social"])
         self.assertIn("velocity_level", decision["blocks"]["social"])
@@ -331,6 +332,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("entry_conditions", decision["blocks"]["ta"])
         self.assertIn("tag", decision["blocks"]["ta"])
         self.assertNotIn("Watch only", decision["verdict_label"])
+
+    def test_preferred_side_uses_short_for_weak_project_pump_and_negative_cvd(self):
+        final = {"direction_bias": "LONG", "verdict": "WATCH_ONLY", "long_score": 50, "short_score": 51}
+        fundamentals = {"metrics": {"circulating_supply_ratio": 0.20}}
+        research_charts = {"metrics": {"scenario": {"code": "fake_pump"}}}
+        derivatives = {"cvd_bias": "negative"}
+
+        self.assertEqual(_preferred_side(final, fundamentals, research_charts, derivatives), "short")
+
+    def test_preferred_side_is_neutral_without_edge(self):
+        final = {"direction_bias": "LONG", "verdict": "WATCH_ONLY", "long_score": 50, "short_score": 51}
+
+        self.assertEqual(_preferred_side(final, {"metrics": {}}, {"metrics": {}}, {"cvd_bias": "neutral"}), "neutral")
 
     def test_coingecko_identity_prefers_exact_symbol_over_rank(self):
         identity = select_coingecko_identity(
