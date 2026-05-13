@@ -347,22 +347,11 @@ function searchResearchCardHtml(card) {
   const metrics = searchQuickMetrics(card);
   const decision = normalizedDecisionLayer(card);
   const blocks = decision.blocks || {};
-  const project = blocks.project || fallbackProjectBlock(card, decision);
   return `<article class="search-result-card">
     <section class="search-hero project-card-block">
       <div class="project-head">
         <time>${formatDate(card.created_at)}</time>
         <h2>${escapeHtml(card.symbol || "")}</h2>
-      </div>
-      <div class="search-hero-side">
-        <span class="verdict-badge ${decisionClass(decision.verdict || project.status)}">${escapeHtml(project.status_label || decision.final_decision?.action || decision.verdict_label || "Наблюдать")}</span>
-        ${definitionList([
-          ["Итог", decision.final_decision?.summary || decision.action],
-          ["Сторона", sideLabel(decision.final_decision?.side || decision.preferred_side)],
-          ["Что нужно", (decision.activation_triggers || []).slice(0, 2).join(" ")],
-          ["CVD", project.cvd_summary?.explanation || cvdMetricNote(metrics.cvd_value, metrics.cvd_bias)]
-        ])}
-        <button type="button" data-open-research>Полная карточка</button>
       </div>
     </section>
     <section class="quick-metrics">
@@ -459,10 +448,11 @@ function fallbackProjectBlock(card, layer = {}) {
 function fallbackFundamentalBlock(stage) {
   const metrics = stage?.metrics || {};
   const split = fundamentalSplit(metrics);
+  const label = fallbackFundamentalQuality(metrics, split.hardBlockers);
   return {
     verdict: split.hardBlockers.length ? "risk" : "ok",
-    verdict_label: split.hardBlockers.length ? "Средний риск" : "Слабый риск",
-    tag: split.hardBlockers.length ? "Средний риск" : "Слабый риск",
+    verdict_label: label,
+    tag: label,
     status_help: "",
     summary: metrics.project_brief_ru || metrics.project_summary || "Описание проекта пока недоступно.",
     blockers: split.hardBlockers,
@@ -540,16 +530,33 @@ function fundamentalDecisionBlock(block, stage) {
 
 function fundamentalRiskLabel(data) {
   const tag = normalizeRiskTag(data.tag);
-  if (tag && ["Слабый риск", "Средний риск", "Сильный риск"].includes(tag)) return tag;
-  if (data.verdict === "blocker" || data.verdict_label === "Блокирующий риск" || data.verdict_label === "Блокер") return "Сильный риск";
-  if (data.verdict === "risk") return "Средний риск";
-  return data.verdict_label || "Слабый риск";
+  if (tag && ["Слабый фундаментал", "Средний фундаментал", "Сильный фундаментал"].includes(tag)) return tag;
+  if (data.verdict_label) return normalizeRiskTag(data.verdict_label);
+  if (data.verdict === "blocker" || data.verdict === "risk") return "Слабый фундаментал";
+  return "Средний фундаментал";
 }
 
 function normalizeRiskTag(tag) {
-  if (tag === "Блокирующий риск" || tag === "Блокер" || tag === "Риск supply") return "Сильный риск";
-  if (tag === "Спекулятивный риск") return "Средний риск";
-  return tag;
+  const value = String(tag || "").trim();
+  if (value === "Блокирующий риск" || value === "Блокер" || value === "Риск supply" || value === "Сильный риск") return "Слабый фундаментал";
+  if (value === "Спекулятивный риск" || value === "Средний риск") return "Средний фундаментал";
+  if (value === "Слабый риск") return "Сильный фундаментал";
+  return value;
+}
+
+function fallbackFundamentalQuality(metrics, blockers = []) {
+  const sector = String(metrics.sector || metrics.narrative || metrics.categories || "").toLowerCase();
+  let score = 50;
+  if (/(ai|artificial intelligence|rwa|real world|privacy|depin)/i.test(sector)) score += 25;
+  if (/(gaming|gamefi|defi|meme)/i.test(sector)) score -= 18;
+  const circulation = Number(metrics.circulating_supply_ratio);
+  if (Number.isFinite(circulation) && circulation < 0.3) score -= 12;
+  if (blockers.length) score -= 14;
+  const mcToFdv = Number(metrics.market_cap_to_fdv_ratio);
+  if (Number.isFinite(mcToFdv) && mcToFdv >= 0.45) score += 10;
+  if (score >= 68) return "Сильный фундаментал";
+  if (score >= 42) return "Средний фундаментал";
+  return "Слабый фундаментал";
 }
 
 function fundamentalProjectDescription(data, metrics) {
@@ -578,7 +585,7 @@ function fundamentalMarketSnapshot(metrics) {
 
 function socialDecisionBlock(block, chartsStage, sentiment) {
   const data = block || fallbackSocialBlock(sentiment, chartsStage);
-  const posts = russianPostList(data.translated_posts || []);
+  const posts = socialPostItems(data);
   return `<article class="decision-card social">
     <div class="decision-card-head">
       <h2>Social Intelligence</h2>
@@ -590,8 +597,7 @@ function socialDecisionBlock(block, chartsStage, sentiment) {
     </section>
     ${socialMetricsExplainer(data)}
     ${researchChartsSummary(chartsStage)}
-    ${data.top_posts_summary_ru ? `<section><h3>Вывод по топ-постам</h3><p>${escapeHtml(data.top_posts_summary_ru)}</p></section>` : ""}
-    ${posts.length ? `<section><h3>Топ-посты LunarCrush</h3>${numberedList(posts)}</section>` : ""}
+    ${data.top_posts_summary_ru || posts.length ? `<section><h3>Вывод по топ-постам</h3>${data.top_posts_summary_ru ? `<p>${escapeHtml(data.top_posts_summary_ru)}</p>` : ""}${posts.length ? `<h3>Топ-посты LunarCrush</h3>${numberedList(posts)}` : ""}</section>` : ""}
   </article>`;
 }
 
@@ -604,6 +610,8 @@ function taDecisionBlock(block, technicalAnalysis) {
     <div class="tag-row"><span class="section-tag ta-tag">${escapeHtml(data.tag || data.strategy_label || "Торговая стратегия")}</span></div>
     <p>${escapeHtml(data.summary || "")}</p>
     ${taMarketContext(data)}
+    ${taSignalContext(data, technicalAnalysis)}
+    ${taTradeMap(data)}
     ${data.supports?.length ? `<section><h3>Подтверждения</h3>${bulletList(data.supports)}</section>` : ""}
     ${data.conflicts?.length ? `<section><h3>Конфликты</h3>${bulletList(data.conflicts)}</section>` : ""}
     <section>
@@ -663,6 +671,61 @@ function taMarketContext(data) {
   return `<section class="ta-market-context">${definitionList(rows)}</section>`;
 }
 
+function taSignalContext(data, technicalAnalysis) {
+  const context = data.technical_context || fallbackTaSignalContext(technicalAnalysis);
+  const rows = compactMetricRows([
+    ["Структура", context.structure],
+    ["RSI", context.rsi],
+    ["Дивергенция", context.rsi_divergence],
+    ["Уровни", context.levels],
+    ["Объем", context.volume],
+    ["ATR", context.atr]
+  ]);
+  if (!rows.length) return "";
+  return `<section class="ta-signal-context"><h3>Контекст рынка</h3>${definitionList(rows)}</section>`;
+}
+
+function taTradeMap(data) {
+  const map = {
+    ...fallbackTradeMap(data),
+    ...(data.trade_map || {})
+  };
+  const rows = compactMetricRows([
+    ["ТВХ", map.entry || (data.entry_conditions || []).join(" ")],
+    ["SL", map.stop || data.invalidation],
+    ["TP", map.take_profit],
+    ["Проверить", map.checklist]
+  ]);
+  if (!rows.length) return "";
+  return `<section class="ta-trade-map"><h3>Карта сделки</h3>${definitionList(rows)}</section>`;
+}
+
+function fallbackTradeMap(data) {
+  const text = String(data.summary || data.strategy_label || data.tag || "").toLowerCase();
+  if (text.includes("шорт")) {
+    return {
+      entry: "Ждать lower-high, слом локальной поддержки и отрицательный CVD.",
+      stop: "SL выше lower-high или зоны возврата цены над сломанной структурой.",
+      take_profit: "TP у ближайшей поддержки/зоны ликвидности; часть закрывать при R:R от 1:2.",
+      checklist: "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD."
+    };
+  }
+  if (text.includes("лонг")) {
+    return {
+      entry: "Ждать ретест уровня, удержание структуры и положительный CVD.",
+      stop: "SL ниже ретеста/свипа с учетом ATR.",
+      take_profit: "TP у локального high/зоны ликвидности; часть закрывать при R:R от 1:2.",
+      checklist: "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD."
+    };
+  }
+  return {
+    entry: "Сначала выбрать сторону: структура, объем и CVD должны совпасть.",
+    stop: "SL ставить за локальный экстремум после подтвержденной ТВХ.",
+    take_profit: "TP строить от ближайшей поддержки/сопротивления; без ТВХ цели не фиксируем.",
+    checklist: "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD."
+  };
+}
+
 function numberedList(items) {
   const rows = (items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   return `<ol>${rows || "<li>Данных пока нет.</li>"}</ol>`;
@@ -670,6 +733,64 @@ function numberedList(items) {
 
 function russianPostList(items) {
   return (items || []).filter((item) => /[А-Яа-яЁё]/.test(String(item || ""))).slice(0, 3);
+}
+
+function socialPostItems(data) {
+  const translated = russianPostList(data.translated_posts || []);
+  if (translated.length) return translated;
+  const summary = String(data.top_posts_summary_ru || "");
+  if (!/[А-Яа-яЁё]/.test(summary)) return [];
+  return summary
+    .split(/(?<=[.!?])\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 24)
+    .slice(0, 3);
+}
+
+function fallbackTaSignalContext(technicalAnalysis) {
+  const signals = technicalAnalysis?.metrics?.signals || {};
+  const value = (key) => signals[key]?.value ?? signals[key];
+  return {
+    structure: structureSignalRu(value("structure_break_hh_hl")),
+    rsi: rsiSignalRu(value("rsi_signal")),
+    rsi_divergence: divergenceSignalRu(value("rsi_divergence")),
+    levels: levelSignalRu(value("breakout_20d_high"), value("structure_break_hh_hl")),
+    volume: booleanSignalRu(value("volume_spike"), "есть всплеск", "нет подтверждения объемом"),
+    atr: booleanSignalRu(value("atr_volatility_expansion"), "волатильность расширяется", "волатильность обычная")
+  };
+}
+
+function structureSignalRu(value) {
+  return ({
+    bearish_break: "слом структуры вниз",
+    bullish_hh_hl: "структура выше high/low",
+    bullish_sweep_reclaim: "снятие ликвидности и возврат"
+  })[value] || "структура не подтверждена";
+}
+
+function rsiSignalRu(value) {
+  return ({
+    bullish: "RSI поддерживает лонг",
+    bearish: "RSI поддерживает шорт",
+    overbought: "RSI в перегреве",
+    oversold: "RSI в перепроданности"
+  })[value] || "нейтрально";
+}
+
+function divergenceSignalRu(value) {
+  return ({ bearish: "медвежья", bullish: "бычья", none: "нет" })[value] || "нет";
+}
+
+function levelSignalRu(breakout, structure) {
+  if (breakout === true) return "пробит 20D high; нужен ретест уровня";
+  if (structure === "bearish_break") return "искать lower-high и локальную поддержку как цель";
+  return "ждать ретест локального high/low";
+}
+
+function booleanSignalRu(value, yes, no) {
+  if (value === true) return yes;
+  if (value === false) return no;
+  return "нет данных";
 }
 
 function timeframeLabel(value) {

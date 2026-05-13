@@ -477,8 +477,8 @@ def _decision_layer(
 ) -> Dict[str, Any]:
     if not final:
         fundamentals_block = _fundamental_trade_block(fundamentals)
-        social_block = _social_trade_block(sentiment, research_charts, fundamentals, "long", {})
-        ta_block = _ta_trade_block({}, {}, "long", "Исследование не дошло до ТА.")
+        social_block = _social_trade_block(sentiment, research_charts, fundamentals, "neutral", {})
+        ta_block = _ta_trade_block({}, {}, "neutral", "Исследование не дошло до ТА.", {})
         return {
             "verdict": "NO_SCORE",
             "verdict_label": "Нет скоринга",
@@ -491,14 +491,14 @@ def _decision_layer(
             "ta": {},
             "chart_next_step": _chart_next_step(research_charts, final),
             "blocks": {
-                "project": _project_trade_block({}, fundamentals, {}, "NO_SCORE", "long"),
+                "project": _project_trade_block({}, fundamentals, {}, "NO_SCORE", "neutral"),
                 "fundamental": fundamentals_block,
                 "social": social_block,
                 "ta": ta_block,
             },
             "final_decision": _final_decision_payload(
                 "NO_SCORE",
-                "long",
+                "neutral",
                 "Проверить failed stage.",
                 "Исследование не дошло до финального скоринга.",
                 ["Перезапустить research после восстановления данных."],
@@ -518,7 +518,7 @@ def _decision_layer(
         "project": _project_trade_block(final, fundamentals, derivatives, verdict, preferred_side),
         "fundamental": _fundamental_trade_block(fundamentals),
         "social": _social_trade_block(sentiment, research_charts, fundamentals, preferred_side, derivatives),
-        "ta": _ta_trade_block(ta, derivatives, preferred_side, _setup_reason(final, final.get("trade_plan") or {})),
+        "ta": _ta_trade_block(ta, derivatives, preferred_side, _setup_reason(final, final.get("trade_plan") or {}), final),
     }
     return {
         "verdict": verdict,
@@ -752,7 +752,7 @@ def _project_tag(metrics: Dict[str, Any], verdict: str) -> str:
         return "Не торговать"
     blockers = _fundamental_hard_blockers(metrics)
     if blockers:
-        return "Сильный риск"
+        return _fundamental_quality_label(metrics, blockers)
     tier = str(metrics.get("fdv_tier") or "")
     if tier in {"tiny", "small"}:
         return "Малая капитализация"
@@ -810,6 +810,7 @@ def _fundamental_decision_layer(stage: Dict[str, Any]) -> Dict[str, Any]:
 def _fundamental_trade_block(stage: Dict[str, Any]) -> Dict[str, Any]:
     metrics = stage.get("metrics") or {}
     blockers = _fundamental_hard_blockers(metrics)
+    quality_label = _fundamental_quality_label(metrics, blockers)
     if any(_hard_blocker_is_critical(item) for item in blockers):
         verdict = "blocker"
         trade_impact = ""
@@ -821,8 +822,8 @@ def _fundamental_trade_block(stage: Dict[str, Any]) -> Dict[str, Any]:
         trade_impact = ""
     return {
         "verdict": verdict,
-        "verdict_label": {"ok": "Слабый риск", "risk": "Средний риск", "blocker": "Сильный риск"}[verdict],
-        "tag": _fundamental_tag(metrics, blockers, verdict),
+        "verdict_label": quality_label,
+        "tag": quality_label,
         "status_help": "",
         "summary": metrics.get("project_brief_ru") or metrics.get("project_summary") or "Описание проекта пока недоступно.",
         "blockers": blockers,
@@ -832,17 +833,65 @@ def _fundamental_trade_block(stage: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _fundamental_tag(metrics: Dict[str, Any], blockers: List[str], verdict: str) -> str:
-    if verdict == "blocker":
-        return "Сильный риск"
-    if blockers:
-        return "Средний риск"
+    quality_label = _fundamental_quality_label(metrics, blockers)
+    if quality_label != "Средний фундаментал":
+        return quality_label
     tier = str(metrics.get("fdv_tier") or "")
     if tier in {"tiny", "small"}:
         return "Малая капитализация"
     sector = str(metrics.get("sector") or metrics.get("narrative") or "").strip()
     if sector:
         return "%s-сектор" % sector.split()[0]
-    return "Слабый риск" if verdict == "ok" else "Средний риск"
+    return quality_label
+
+
+def _fundamental_quality_label(metrics: Dict[str, Any], blockers: List[str]) -> str:
+    score = 50.0
+    sector_blob = " ".join(
+        str(item)
+        for item in [
+            metrics.get("sector"),
+            metrics.get("narrative"),
+            ", ".join(str(value) for value in (metrics.get("categories") or []))
+            if isinstance(metrics.get("categories"), list)
+            else metrics.get("categories"),
+        ]
+        if item
+    ).lower()
+    if any(term in sector_blob for term in ("ai", "artificial intelligence", "rwa", "real world", "privacy", "depin")):
+        score += 25.0
+    if any(term in sector_blob for term in ("gaming", "gamefi", "defi", "meme")):
+        score -= 18.0
+    supply = _number(metrics.get("circulating_supply_ratio"))
+    if supply is not None:
+        if supply >= 0.55:
+            score += 10.0
+        elif supply < 0.30:
+            score -= 12.0
+    mc_fdv = _number(metrics.get("market_cap_to_fdv_ratio"))
+    if mc_fdv is not None:
+        if mc_fdv >= 0.45:
+            score += 10.0
+        elif mc_fdv < 0.20:
+            score -= 10.0
+    fdv_tier = str(metrics.get("fdv_tier") or "")
+    if fdv_tier in {"small", "mid", "large"}:
+        score += 5.0
+    if fdv_tier in {"tiny", "giant"}:
+        score -= 8.0
+    tokenomics = _number(metrics.get("tokenomics_risk_score"))
+    if tokenomics is not None and tokenomics >= 65:
+        score -= 8.0
+    critical_blockers = [item for item in blockers if _hard_blocker_is_critical(item)]
+    if critical_blockers:
+        score -= 12.0
+    if any(term in " ".join(blockers).lower() for term in ("scam", "rug", "blacklist")):
+        score -= 30.0
+    if score >= 68.0:
+        return "Сильный фундаментал"
+    if score >= 42.0:
+        return "Средний фундаментал"
+    return "Слабый фундаментал"
 
 
 def _fundamental_reasons(metrics: Dict[str, Any], blockers: List[str], verdict: str) -> List[str]:
@@ -872,7 +921,7 @@ def _fundamental_hard_blockers(metrics: Dict[str, Any]) -> List[str]:
         blockers.append("Упоминается unlock/vesting: нужна ручная проверка даты и размера.")
     tokenomics = _number(metrics.get("tokenomics_risk_score"))
     if tokenomics is not None and tokenomics >= 65:
-        blockers.append("Высокий риск токеномики.")
+        blockers.append("Токеномика требует ручной проверки.")
     supply = _number(metrics.get("circulating_supply_ratio"))
     if supply is not None and supply < 0.30:
         blockers.append("Циркуляция ниже 30% от общего или максимального предложения.")
@@ -972,7 +1021,13 @@ def _side_label(side: str) -> str:
     return "Лонг" if side == "long" else "Шорт" if side == "short" else "Нейтрально"
 
 
-def _ta_trade_block(ta: Dict[str, Any], derivatives: Dict[str, Any], preferred_side: str, setup_reason: str) -> Dict[str, Any]:
+def _ta_trade_block(
+    ta: Dict[str, Any],
+    derivatives: Dict[str, Any],
+    preferred_side: str,
+    setup_reason: str,
+    final: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     score = _number(ta.get("decision_score")) or 0.0
     conflict = bool(derivatives.get("cvd_conflict"))
     if conflict:
@@ -1002,6 +1057,8 @@ def _ta_trade_block(ta: Dict[str, Any], derivatives: Dict[str, Any], preferred_s
         "conflicts": conflicts[:3],
         "entry_conditions": _ta_entry_conditions(preferred_side, derivatives),
         "invalidation": setup_reason if setup_reason and "Нет сетапа" not in setup_reason else "Инвалидация: отменить идею при сломе локальной структуры против выбранной стороны.",
+        "technical_context": _ta_technical_context(final or {}),
+        "trade_map": _ta_trade_map(preferred_side, setup_reason, final or {}),
         "trade_impact": impact,
         "terms": [
             "CVD — разница рыночных покупок и продаж; положительный CVD поддерживает лонг, отрицательный поддерживает шорт.",
@@ -1036,6 +1093,78 @@ def _ta_entry_conditions(preferred_side: str, derivatives: Dict[str, Any]) -> Li
         conditions.append("Сначала выбрать сторону: дождаться либо lower-high/слома вниз, либо возврата структуры вверх.")
         conditions.append("CVD и объем должны подтвердить выбранное направление.")
     return conditions
+
+
+def _ta_technical_context(final: Dict[str, Any]) -> Dict[str, str]:
+    signals = ((final.get("technical_analysis") or {}).get("signals") or {})
+    structure = _signal_value(signals, "structure_break_hh_hl")
+    rsi = _signal_value(signals, "rsi_signal")
+    divergence = _signal_value(signals, "rsi_divergence")
+    breakout = _signal_value(signals, "breakout_20d_high")
+    volume = _signal_value(signals, "volume_spike")
+    atr = _signal_value(signals, "atr_volatility_expansion")
+    return {
+        "structure": _structure_signal_ru(structure),
+        "rsi": _rsi_signal_ru(rsi),
+        "rsi_divergence": _divergence_signal_ru(divergence),
+        "levels": _level_signal_ru(breakout, structure),
+        "volume": "есть всплеск объема" if volume is True else "нет подтверждения объемом" if volume is False else "объем не оценен",
+        "atr": "ATR расширяется: стоп считать шире обычного" if atr is True else "ATR без расширения" if atr is False else "ATR не оценен",
+    }
+
+
+def _ta_trade_map(preferred_side: str, setup_reason: str, final: Dict[str, Any]) -> Dict[str, str]:
+    trade_plan = final.get("trade_plan") or {}
+    if preferred_side == "short":
+        fallback_entry = "Ждать lower-high, слом локальной поддержки и отрицательный CVD."
+        fallback_stop = "SL выше lower-high или зоны возврата цены над сломанной структурой."
+        fallback_tp = "TP у ближайшей поддержки/зоны ликвидности; часть позиции закрывать при R:R от 1:2."
+    elif preferred_side == "long":
+        fallback_entry = "Ждать ретест уровня, удержание структуры и положительный CVD."
+        fallback_stop = "SL ниже ретеста/свипа с учетом ATR."
+        fallback_tp = "TP у локального high/зоны ликвидности; часть позиции закрывать при R:R от 1:2."
+    else:
+        fallback_entry = "Сначала выбрать сторону: структура, объем и CVD должны совпасть."
+        fallback_stop = "SL ставить за локальный экстремум после подтвержденной ТВХ."
+        fallback_tp = "TP строить от ближайшей поддержки/сопротивления; без ТВХ цели не фиксируем."
+    return {
+        "entry": trade_plan.get("entry") or fallback_entry,
+        "stop": trade_plan.get("stop_loss") or fallback_stop,
+        "take_profit": trade_plan.get("take_profit_1") or trade_plan.get("take_profit") or fallback_tp,
+        "checklist": "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD.",
+        "invalidation_note": setup_reason or "",
+    }
+
+
+def _structure_signal_ru(value: Any) -> str:
+    return {
+        "bearish_break": "слом структуры вниз",
+        "bullish_hh_hl": "структура higher-high / higher-low",
+        "bullish_sweep_reclaim": "снятие ликвидности и возврат",
+    }.get(str(value), "структура не подтверждена")
+
+
+def _rsi_signal_ru(value: Any) -> str:
+    return {
+        "bullish": "RSI поддерживает лонг",
+        "bearish": "RSI поддерживает шорт",
+        "overbought": "RSI в перегреве",
+        "oversold": "RSI в перепроданности",
+    }.get(str(value), "RSI нейтрален")
+
+
+def _divergence_signal_ru(value: Any) -> str:
+    return {"bearish": "медвежья", "bullish": "бычья", "none": "нет"}.get(str(value), "нет")
+
+
+def _level_signal_ru(breakout: Any, structure: Any) -> str:
+    if breakout is True:
+        return "пробит 20D high; вход только после ретеста"
+    if structure == "bearish_break":
+        return "lower-high как зона входа, ближайшая поддержка как первая цель"
+    if structure in {"bullish_hh_hl", "bullish_sweep_reclaim"}:
+        return "ретест локальной поддержки как зона входа"
+    return "ждать понятный локальный high/low перед расчетом ТВХ"
 
 
 def _chart_next_step(stage: Dict[str, Any], final: Dict[str, Any]) -> str:

@@ -324,12 +324,17 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("cvd_summary", decision["blocks"]["project"])
         self.assertIn(decision["blocks"]["fundamental"]["verdict"], {"ok", "risk", "blocker"})
         self.assertNotEqual(decision["blocks"]["fundamental"]["verdict_label"], "Блокер")
-        self.assertIn(decision["blocks"]["fundamental"]["verdict_label"], {"Слабый риск", "Средний риск", "Сильный риск"})
+        self.assertIn(
+            decision["blocks"]["fundamental"]["verdict_label"],
+            {"Слабый фундаментал", "Средний фундаментал", "Сильный фундаментал"},
+        )
         self.assertIn("tag", decision["blocks"]["fundamental"])
         self.assertIn("scenario_label_ru", decision["blocks"]["social"])
         self.assertIn("velocity_level", decision["blocks"]["social"])
         self.assertNotIn("cvd_note", decision["blocks"]["social"])
         self.assertIn("entry_conditions", decision["blocks"]["ta"])
+        self.assertIn("technical_context", decision["blocks"]["ta"])
+        self.assertIn("trade_map", decision["blocks"]["ta"])
         self.assertIn("tag", decision["blocks"]["ta"])
         self.assertNotIn("Watch only", decision["verdict_label"])
 
