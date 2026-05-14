@@ -18,6 +18,7 @@ from hype_radar.token_intelligence import (
     primary_project_category,
     select_coingecko_identity,
     social_stage_payload,
+    token_query_aliases,
 )
 
 
@@ -219,6 +220,29 @@ class RecordingCoinGecko:
         raise AssertionError("CoinGecko categories must not be called")
 
 
+class AliasCoinGecko:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query):
+        self.calls.append(("search", query))
+        if query == "PUMPFUN":
+            return {"coins": [{"id": "wrong-pumpfun", "symbol": "PUMPFUNX", "name": "Wrong Pumpfun", "market_cap_rank": 999}]}
+        if query == "PUMP":
+            return {"coins": [{"id": "pump-fun", "symbol": "pump", "name": "Pump.fun", "market_cap_rank": 80}]}
+        return {"coins": []}
+
+    def coin(self, coin_id):
+        self.calls.append(("coin", coin_id))
+        payload = token_payload("PUMP", coin_id=coin_id, market_cap=500_000_000, fdv=1_000_000_000)
+        payload["coingecko"]["coin_data"]["categories"] = ["Meme", "Solana Ecosystem"]
+        return payload["coingecko"]["coin_data"]
+
+    def markets(self, coin_id):
+        self.calls.append(("markets", coin_id))
+        return token_payload("PUMP", coin_id=coin_id)["coingecko"]["market"]
+
+
 class PipelineTests(unittest.TestCase):
     def setUp(self):
         os.environ.pop("ENABLE_BLACKLIST_FILTER", None)
@@ -412,6 +436,23 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(identity.coin_id, "b3")
         self.assertGreaterEqual(identity.confidence, 0.9)
+
+    def test_token_aliases_resolve_pumpfun_to_pump_identity(self):
+        fake = AliasCoinGecko()
+        client = MppTokenIntelligenceClient()
+        client._tempo_configured = lambda: False
+        client.direct_coingecko = fake
+        client.lunarcrush_key = ""
+
+        payload = client.research("PUMPFUN")
+        calls = [call for call in fake.calls if call[0] == "search"]
+
+        self.assertIn("PUMP", token_query_aliases("PUMPFUN"))
+        self.assertEqual(payload["identity"]["coin_id"], "pump-fun")
+        self.assertEqual(payload["identity"]["symbol"], "PUMP")
+        self.assertEqual(payload["resolved_base_coin"], "PUMP")
+        self.assertGreaterEqual(payload["identity"]["confidence"], 0.7)
+        self.assertEqual(calls[:2], [("search", "PUMPFUN"), ("search", "PUMP")])
 
     def test_fundamentals_can_pass_with_coingecko_when_lunarcrush_is_missing(self):
         intelligence = FakeTokenIntelligence({"DWF": token_payload("DWF", coin_id="dwf-token")})

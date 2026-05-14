@@ -149,14 +149,15 @@ class MppTokenIntelligenceClient:
         errors: List[str] = []
         identity, search = self._cached_identity(
             base_coin,
-            lambda: self._safe_post(self.coingecko_url, "/coingecko/search", {"query": base_coin}, errors),
+            lambda query: self._safe_post(self.coingecko_url, "/coingecko/search", {"query": query}, errors),
         )
+        lunar_query = identity.symbol if identity.coin_id and identity.symbol else base_coin
         if not identity.coin_id:
             return {
                 "base_coin": base_coin,
                 "identity": identity.__dict__,
                 "coingecko": {"search": search, "provider": "mpp"},
-                "lunarcrush": self._lunarcrush_research(base_coin, errors),
+                "lunarcrush": self._lunarcrush_research(lunar_query, errors),
                 "errors": errors,
             }
 
@@ -176,10 +177,11 @@ class MppTokenIntelligenceClient:
             {"vs_currency": "usd", "ids": identity.coin_id, "price_change_percentage": "24h,7d"},
             errors,
         )
-        lunarcrush = self._lunarcrush_research(base_coin, errors)
+        lunarcrush = self._lunarcrush_research(lunar_query, errors)
 
         return {
             "base_coin": base_coin,
+            "resolved_base_coin": lunar_query,
             "identity": identity.__dict__,
             "coingecko": {
                 "provider": "mpp",
@@ -195,9 +197,10 @@ class MppTokenIntelligenceClient:
         errors: List[str] = []
         identity, search = self._cached_identity(
             base_coin,
-            lambda: self._safe_direct("coingecko/search", lambda: self.direct_coingecko.search(base_coin), errors),
+            lambda query: self._safe_direct("coingecko/search", lambda: self.direct_coingecko.search(query), errors),
         )
-        lunarcrush = self._lunarcrush_research(base_coin, errors)
+        lunar_query = identity.symbol if identity.coin_id and identity.symbol else base_coin
+        lunarcrush = self._lunarcrush_research(lunar_query, errors)
         if not identity.coin_id:
             return {
                 "base_coin": base_coin,
@@ -212,6 +215,7 @@ class MppTokenIntelligenceClient:
 
         return {
             "base_coin": base_coin,
+            "resolved_base_coin": lunar_query,
             "identity": identity.__dict__,
             "coingecko": {
                 "provider": "direct",
@@ -227,10 +231,29 @@ class MppTokenIntelligenceClient:
         key = base_coin.upper()
         if key in self.identity_cache:
             return self.identity_cache[key], {"cached": True, "query": base_coin}
-        search = search_callback()
-        identity = select_coingecko_identity(base_coin, search)
+        aliases = token_query_aliases(base_coin)
+        attempts: List[Dict[str, Any]] = []
+        best_identity = TokenIdentity(None, base_coin, "", 0.0, "No CoinGecko search result matched the Bybit base coin.")
+        best_search: Dict[str, Any] = {}
+        for query in aliases:
+            search = search_callback(query)
+            identity = select_coingecko_identity(base_coin, search, query=query, aliases=aliases)
+            attempts.append({"query": query, "confidence": identity.confidence, "coin_id": identity.coin_id, "symbol": identity.symbol})
+            if identity.confidence > best_identity.confidence:
+                best_identity = identity
+                best_search = search if isinstance(search, dict) else {}
+            if identity.confidence >= 0.7:
+                break
+        identity = best_identity
         self.identity_cache[key] = identity
-        return identity, search if isinstance(search, dict) else {}
+        search_payload = dict(best_search)
+        search_payload["identity_resolution"] = {
+            "base_coin": base_coin,
+            "queries": aliases,
+            "attempts": attempts,
+            "selected_query": next((item["query"] for item in attempts if item["coin_id"] == identity.coin_id), aliases[0] if aliases else base_coin),
+        }
+        return identity, search_payload
 
     def _tempo_configured(self) -> bool:
         return bool(shutil.which(self.tempo_bin) or os.path.exists(self.tempo_bin))
@@ -321,10 +344,19 @@ class MppTokenIntelligenceClient:
         return parsed
 
 
-def select_coingecko_identity(base_coin: str, search_payload: Any) -> TokenIdentity:
+def select_coingecko_identity(base_coin: str, search_payload: Any, query: Optional[str] = None, aliases: Optional[List[str]] = None) -> TokenIdentity:
     coins = list((search_payload or {}).get("coins") or []) if isinstance(search_payload, dict) else []
-    base = base_coin.lower()
-    exact = [coin for coin in coins if str(coin.get("symbol", "")).lower() == base]
+    base = normalize_token_key(base_coin)
+    alias_keys = {normalize_token_key(item) for item in (aliases or token_query_aliases(base_coin))}
+    exact_base = [coin for coin in coins if normalize_token_key(str(coin.get("symbol", ""))) == base]
+    exact_alias = [coin for coin in coins if normalize_token_key(str(coin.get("symbol", ""))) in alias_keys]
+    name_alias = [
+        coin
+        for coin in coins
+        if normalize_token_key(str(coin.get("name", ""))) in alias_keys
+        or normalize_token_key(str(coin.get("id", ""))) in alias_keys
+    ]
+    exact = exact_base or exact_alias or name_alias
     candidates = exact or coins
     if not candidates:
         return TokenIdentity(None, base_coin, "", 0.0, "No CoinGecko search result matched the Bybit base coin.")
@@ -334,15 +366,63 @@ def select_coingecko_identity(base_coin: str, search_payload: Any) -> TokenIdent
         return int(rank) if isinstance(rank, int) and rank > 0 else 1_000_000
 
     selected = sorted(candidates, key=rank_key)[0]
-    confidence = 0.95 if selected in exact else 0.55
+    if selected in exact_base:
+        confidence = 0.95
+        reason = "Exact ticker match."
+    elif selected in exact_alias:
+        confidence = 0.9
+        reason = "Alias ticker match: %s resolved from Bybit %s." % (selected.get("symbol") or query or "", base_coin)
+    elif selected in name_alias:
+        confidence = 0.78
+        reason = "Alias name/id match resolved from Bybit %s." % base_coin
+    else:
+        confidence = 0.55
+        reason = "Fallback to highest-ranked CoinGecko search result."
     return TokenIdentity(
         coin_id=str(selected.get("id") or ""),
         symbol=str(selected.get("symbol") or base_coin).upper(),
         name=str(selected.get("name") or ""),
         confidence=confidence,
-        reason="Exact ticker match." if selected in exact else "Fallback to highest-ranked CoinGecko search result.",
+        reason=reason,
         raw_match=selected,
     )
+
+
+def token_query_aliases(base_coin: str) -> List[str]:
+    base = str(base_coin or "").upper().strip()
+    aliases: List[str] = [base]
+    known = {
+        "PUMPFUN": ["PUMP", "PUMP.FUN", "PUMP FUN", "PUMPFUN"],
+    }
+    aliases.extend(known.get(base, []))
+    if base.endswith("FUN") and len(base) > 4:
+        root = base[:-3]
+        aliases.extend([root, "%s.FUN" % root, "%s FUN" % root])
+    aliases.extend(_env_token_aliases().get(base, []))
+    return dedupe_texts([alias for alias in aliases if alias])
+
+
+def _env_token_aliases() -> Dict[str, List[str]]:
+    raw = os.getenv("TOKEN_ALIAS_MAP") or ""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    output: Dict[str, List[str]] = {}
+    for key, value in parsed.items():
+        if isinstance(value, str):
+            output[str(key).upper()] = [value]
+        elif isinstance(value, list):
+            output[str(key).upper()] = [str(item) for item in value if item]
+    return output
+
+
+def normalize_token_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
 def first_contract_address(coin_data: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
