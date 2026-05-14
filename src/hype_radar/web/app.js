@@ -357,6 +357,7 @@ function searchResearchCardHtml(card) {
     <section class="quick-metrics">
       ${quickMetric("Изм. цены", pct(metrics.price_change_pct), `${metrics.window_hours}ч`, metrics.price_change_pct)}
       ${quickMetric("Изм. объема", pct(metrics.volume_change_pct), `${metrics.window_hours}ч`, metrics.volume_change_pct, { omitIfMissing: true })}
+      ${quickMetric("Перегретость", lateEntryMetric(metrics.late_entry_risk), lateEntryNote(metrics.late_entry_risk), metrics.late_entry_risk)}
       ${quickMetric("Объем 24ч", money(metrics.turnover_24h), "Bybit", metrics.turnover_24h)}
       ${quickMetric("Фандинг", pct(metrics.funding_rate), fundingLevel(metrics.funding_rate), metrics.funding_rate)}
       ${quickMetric("Лонги / шорты", longShort(metrics.long_ratio, metrics.short_ratio), "соотношение позиций", metrics.long_ratio ?? metrics.short_ratio)}
@@ -373,11 +374,13 @@ function searchResearchCardHtml(card) {
 function searchQuickMetrics(card) {
   const pipelineMetrics = marketMetrics(card.pipeline || {});
   const derivatives = card.technical_analysis?.metrics?.derivatives_filter?.metrics || {};
+  const manipulationMetrics = cardStage(card, "manipulation_detector")?.metrics || {};
   const cvd = derivatives.cvd || {};
   return {
     window_hours: pipelineMetrics.scan_window_hours || searchWindowHours(),
     price_change_pct: pipelineMetrics.price_change_pct,
     volume_change_pct: pipelineMetrics.volume_change_pct,
+    late_entry_risk: card.pipeline?.candidate?.late_entry_risk ?? manipulationMetrics.late_entry_risk ?? card.manipulation?.metrics?.late_entry_risk ?? card.final_decision?.late_entry_risk,
     turnover_24h: pipelineMetrics.turnover_24h ?? card.pipeline?.candidate?.turnover_24h,
     funding_rate: pipelineMetrics.funding_rate ?? derivatives.funding_rate,
     open_interest: pipelineMetrics.open_interest ?? derivatives.open_interest,
@@ -402,6 +405,18 @@ function quickMetric(label, value, note, rawValue, options = {}) {
     <strong>${escapeHtml(available ? value : "нет данных")}</strong>
     <em>${escapeHtml(available ? note : "источник не вернул значение")}</em>
   </div>`;
+}
+
+function lateEntryMetric(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "нет данных";
+  return `${number.toFixed(0)}/100`;
+}
+
+function lateEntryNote(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "источник не вернул значение";
+  return lateEntryLevel(number);
 }
 
 function normalizedDecisionLayer(card) {
