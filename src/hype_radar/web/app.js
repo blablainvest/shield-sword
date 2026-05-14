@@ -360,7 +360,7 @@ function searchResearchCardHtml(card) {
       ${quickMetric("Объем 24ч", money(metrics.turnover_24h), "Bybit", metrics.turnover_24h)}
       ${quickMetric("Фандинг", pct(metrics.funding_rate), fundingLevel(metrics.funding_rate), metrics.funding_rate)}
       ${quickMetric("Лонги / шорты", longShort(metrics.long_ratio, metrics.short_ratio), "соотношение позиций", metrics.long_ratio ?? metrics.short_ratio)}
-      ${quickMetric("CVD", cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias), "баланс покупок и продаж", metrics.cvd_value)}
+      ${quickMetric("CVD", cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias, metrics.cvd_buy_pct, metrics.cvd_sell_pct), "рыночные покупки / рыночные продажи", metrics.cvd_value)}
     </section>
     <section class="decision-blocks">
       ${fundamentalDecisionBlock(blocks.fundamental, card.fundamentals)}
@@ -386,7 +386,11 @@ function searchQuickMetrics(card) {
     short_ratio: pipelineMetrics.short_ratio ?? derivatives.short_ratio,
     long_short_status: derivatives.long_short_ratio_status,
     cvd_value: cvd.cvd_base,
-    cvd_bias: cvdBiasFromValue(cvd.cvd_base)
+    cvd_buy_volume: cvd.buy_volume_base,
+    cvd_sell_volume: cvd.sell_volume_base,
+    cvd_buy_pct: cvdSidePct(cvd.buy_volume_base, cvd.sell_volume_base, "buy"),
+    cvd_sell_pct: cvdSidePct(cvd.buy_volume_base, cvd.sell_volume_base, "sell"),
+    cvd_bias: cvdBiasFromCvd(cvd.cvd_base, cvd.buy_volume_base, cvd.sell_volume_base)
   };
 }
 
@@ -437,10 +441,12 @@ function fallbackProjectBlock(card, layer = {}) {
     status_label: verdictLabelRu(verdict),
     project_one_liner: fundamentals.project_brief_ru || fundamentals.project_summary || "",
     cvd_summary: {
-      label: cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias),
+      label: cvdMetricLabel(metrics.cvd_value, metrics.cvd_bias, metrics.cvd_buy_pct, metrics.cvd_sell_pct),
       bias: metrics.cvd_bias,
-      explanation: cvdMetricNote(metrics.cvd_value, metrics.cvd_bias),
-      value: metrics.cvd_value
+      explanation: cvdMetricNote(metrics.cvd_value, metrics.cvd_bias, metrics.cvd_buy_pct, metrics.cvd_sell_pct),
+      value: metrics.cvd_value,
+      buy_pct: metrics.cvd_buy_pct,
+      sell_pct: metrics.cvd_sell_pct
     }
   };
 }
@@ -492,8 +498,8 @@ function fallbackTaBlock(technicalAnalysis) {
     tag: "Нет подтверждения",
     strategy_label: "Нет подтверждения",
     cvd_summary: {
-      label: "CVD: нет данных",
-      explanation: "CVD — баланс рыночных покупок и продаж."
+      label: "Нет данных",
+      explanation: "Источник не вернул recent trades."
     },
     summary: ta.summary || "ТА пока не дала отдельного вывода.",
     supports: (ta.positives || []).map((item) => item.label || item.key),
@@ -544,8 +550,28 @@ function normalizeRiskTag(tag) {
   return value;
 }
 
+function primaryCategory(metrics = {}) {
+  const value = String(metrics.primary_category || "").trim();
+  if (value) return value;
+  const categories = Array.isArray(metrics.categories) ? metrics.categories.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const priority = [
+    ["AI", ["artificial intelligence", "ai ", " ai", "ai/"]],
+    ["RWA", ["real world assets", "rwa"]],
+    ["Privacy", ["privacy", "zero knowledge", "zk"]],
+    ["DePIN", ["depin"]],
+    ["Infrastructure", ["infrastructure", "modular blockchain", "data availability"]],
+    ["Meme", ["meme"]],
+    ["Gaming/GameFi", ["gaming", "gamefi", "play to earn"]],
+    ["DeFi", ["defi", "decentralized finance", "dex", "lending", "yield"]]
+  ];
+  for (const [label, terms] of priority) {
+    if (categories.some((category) => terms.some((term) => category.toLowerCase().includes(term)))) return label;
+  }
+  return categories.find((category) => !/(ecosystem|chain|airdrop|portfolio|made in|hodler|binance|solana|ethereum|base|layer 1|layer 2)/i.test(category)) || categories[0] || "";
+}
+
 function fallbackFundamentalQuality(metrics, blockers = []) {
-  const sector = String(metrics.sector || metrics.narrative || metrics.categories || "").toLowerCase();
+  const sector = String(metrics.primary_category || primaryCategory(metrics) || metrics.sector || metrics.narrative || metrics.categories || "").toLowerCase();
   let score = 50;
   if (/(ai|artificial intelligence|rwa|real world|privacy|depin)/i.test(sector)) score += 25;
   if (/(gaming|gamefi|defi|meme)/i.test(sector)) score -= 18;
@@ -573,7 +599,7 @@ function fundamentalMarketSnapshot(metrics) {
     ["MC", money(metrics.market_cap)],
     ["FDV", money(metrics.fdv)],
     ["Циркуляция", ratioPct(metrics.circulating_supply_ratio)],
-    ["Сектор", metrics.sector || metrics.narrative]
+    ["Категория", metrics.primary_category || primaryCategory(metrics) || metrics.sector || metrics.narrative]
   ];
   const visibleRows = compactMetricRows(rows);
   if (!visibleRows.length) return "";
@@ -596,8 +622,8 @@ function socialDecisionBlock(block, chartsStage, sentiment) {
       <p>${escapeHtml(data.summary || "")}</p>
     </section>
     ${socialMetricsExplainer(data)}
-    ${researchChartsSummary(chartsStage)}
-    ${data.top_posts_summary_ru || posts.length ? `<section><h3>Вывод по топ-постам</h3>${data.top_posts_summary_ru ? `<p>${escapeHtml(data.top_posts_summary_ru)}</p>` : ""}${posts.length ? `<h3>Топ-посты LunarCrush</h3>${numberedList(posts)}` : ""}</section>` : ""}
+    ${researchChartsSummary(chartsStage, data.status_code)}
+    ${data.top_posts_summary_ru || posts.length ? `<section><h3>Вывод по топ-постам</h3>${data.top_posts_summary_ru ? `<p>${escapeHtml(data.top_posts_summary_ru)}</p>` : ""}${posts.length ? `<h3>Топ-посты LunarCrush</h3>${socialPostsList(posts)}` : ""}</section>` : ""}
   </article>`;
 }
 
@@ -630,6 +656,7 @@ function socialMetricsExplainer(data) {
     ["Упоминания", wholeNumber(data.current_mentions)],
     [data.baseline_label || "База упоминаний", wholeNumber(data.baseline_mentions)],
     ["Скорость", `${velocityRatio(data.velocity_ratio)} · ${data.velocity_level || velocityLevel(data.velocity_ratio)}`],
+    ["AltRank LunarCrush", altRankLabel(data.alt_rank)],
     [data.window_label || "Окно замера", timeframeLabel(data.window)]
   ]);
 }
@@ -665,24 +692,24 @@ function decisionClass(verdict) {
 function taMarketContext(data) {
   const cvd = data.cvd_summary || {};
   const rows = [
-    ["CVD", cvd.label],
-    ["Смысл CVD", cvd.explanation]
+    ["Статус", cvd.label],
+    ["Метрика", cvd.explanation]
   ];
-  return `<section class="ta-market-context">${definitionList(rows)}</section>`;
+  return `<section class="ta-market-context"><h3>CVD</h3>${definitionList(rows)}</section>`;
 }
 
 function taSignalContext(data, technicalAnalysis) {
   const context = data.technical_context || fallbackTaSignalContext(technicalAnalysis);
   const rows = compactMetricRows([
-    ["Структура", context.structure],
+    ["Контекст старших ТФ", data.trend_summary || context.structure],
     ["RSI", context.rsi],
-    ["Дивергенция", context.rsi_divergence],
-    ["Уровни", context.levels],
+    ["RSI divergence", context.rsi_divergence],
+    ["Уровни", data.levels_summary || context.levels],
     ["Объем", context.volume],
     ["ATR", context.atr]
   ]);
   if (!rows.length) return "";
-  return `<section class="ta-signal-context"><h3>Контекст рынка</h3>${definitionList(rows)}</section>`;
+  return `<section class="ta-signal-context"><h3>Индикаторы и уровни</h3>${definitionList(rows)}</section>`;
 }
 
 function taTradeMap(data) {
@@ -694,7 +721,7 @@ function taTradeMap(data) {
     ["ТВХ", map.entry || (data.entry_conditions || []).join(" ")],
     ["SL", map.stop || data.invalidation],
     ["TP", map.take_profit],
-    ["Проверить", map.checklist]
+    ["Перед входом", map.checklist]
   ]);
   if (!rows.length) return "";
   return `<section class="ta-trade-map"><h3>Карта сделки</h3>${definitionList(rows)}</section>`;
@@ -706,7 +733,7 @@ function fallbackTradeMap(data) {
     return {
       entry: "Ждать lower-high, слом локальной поддержки и отрицательный CVD.",
       stop: "SL выше lower-high или зоны возврата цены над сломанной структурой.",
-      take_profit: "TP у ближайшей поддержки/зоны ликвидности; часть закрывать при R:R от 1:2.",
+      take_profit: "TP у ближайшей поддержки/зоны ликвидности; сетап активен только при R:R >= 1:3.",
       checklist: "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD."
     };
   }
@@ -714,7 +741,7 @@ function fallbackTradeMap(data) {
     return {
       entry: "Ждать ретест уровня, удержание структуры и положительный CVD.",
       stop: "SL ниже ретеста/свипа с учетом ATR.",
-      take_profit: "TP у локального high/зоны ликвидности; часть закрывать при R:R от 1:2.",
+      take_profit: "TP у локального high/зоны ликвидности; сетап активен только при R:R >= 1:3.",
       checklist: "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD."
     };
   }
@@ -736,6 +763,11 @@ function russianPostList(items) {
 }
 
 function socialPostItems(data) {
+  if (Array.isArray(data.top_posts) && data.top_posts.length) {
+    return data.top_posts
+      .filter((item) => item && typeof item === "object")
+      .slice(0, 3);
+  }
   const translated = russianPostList(data.translated_posts || []);
   if (translated.length) return translated;
   const summary = String(data.top_posts_summary_ru || "");
@@ -747,7 +779,44 @@ function socialPostItems(data) {
     .slice(0, 3);
 }
 
+function socialPostsList(items) {
+  const rows = (items || []).slice(0, 3).map((item) => {
+    if (!item || typeof item !== "object") return `<li>${escapeHtml(item)}</li>`;
+    const translated = item.translated_ru || item.translated || "";
+    const original = item.original_text || item.original || "";
+    const creator = item.creator ? `<span class="post-creator">${escapeHtml(item.creator)}</span>` : "";
+    const link = item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Открыть</a>` : "";
+    return `<li class="social-post-item">
+      ${creator}
+      <strong>${escapeHtml(translated || "Перевод недоступен")}</strong>
+      ${original ? `<small>Оригинал: ${escapeHtml(original)}</small>` : ""}
+      ${link}
+    </li>`;
+  }).join("");
+  return `<ol class="social-post-list">${rows || "<li>Данных пока нет.</li>"}</ol>`;
+}
+
+function altRankLabel(value) {
+  const rank = value && typeof value === "object" ? value.value : value;
+  if (rank === null || rank === undefined || rank === "") return "нет данных";
+  return `#${wholeNumber(rank)} · меньше = лучше`;
+}
+
 function fallbackTaSignalContext(technicalAnalysis) {
+  const mtf = technicalAnalysis?.metrics?.multi_timeframe || {};
+  if (Object.keys(mtf).length) {
+    const tf4 = mtf["240"] || {};
+    const tf1 = mtf["60"] || {};
+    const tf15 = mtf["15"] || {};
+    return {
+      structure: `${tf4.label || "4ч"} тренд: ${trendRu(tf4.trend)}; ${tf1.label || "1ч"} структура: ${structureMtfRu(tf1.structure)}`,
+      rsi: rsiMtfText(tf1, tf15),
+      rsi_divergence: divergenceMtfText(mtf),
+      levels: levelsMtfText(technicalAnalysis?.metrics?.levels || {}),
+      volume: volumeMtfText(tf15, tf1),
+      atr: atrMtfText(tf15, tf1)
+    };
+  }
   const signals = technicalAnalysis?.metrics?.signals || {};
   const value = (key) => signals[key]?.value ?? signals[key];
   return {
@@ -760,12 +829,75 @@ function fallbackTaSignalContext(technicalAnalysis) {
   };
 }
 
+function trendRu(value) {
+  return ({ uptrend: "восходящий", downtrend: "нисходящий", range: "боковик" })[value] || "нет данных";
+}
+
+function structureMtfRu(value) {
+  return ({
+    higher_high_higher_low: "HH/HL, бычья структура",
+    lower_high_lower_low: "LH/LL, медвежья структура",
+    range: "диапазон"
+  })[value] || "нет данных";
+}
+
+function rsiMtfText(tf1 = {}, tf15 = {}) {
+  return [tf1, tf15].map((tf) => {
+    const payload = tf.rsi || {};
+    if (payload.value === null || payload.value === undefined) return "";
+    return `RSI ${payload.timeframe || tf.label || "ТФ"}: ${metricNumber(payload.value)}, ${payload.zone || "нет зоны"}`;
+  }).filter(Boolean).join("; ") || "RSI: нет данных";
+}
+
+function divergenceMtfText(mtf = {}) {
+  return ["240", "60", "15"].map((key) => {
+    const tf = mtf[key] || {};
+    const payload = tf.divergence || {};
+    return `RSI divergence ${payload.timeframe || tf.label || key}: ${divergenceSignalRu(payload.value || "none")}`;
+  }).join("; ");
+}
+
+function levelsMtfText(levels = {}) {
+  const supports = Array.isArray(levels.supports) ? levels.supports : [];
+  const resistances = Array.isArray(levels.resistances) ? levels.resistances : [];
+  const strong = Array.isArray(levels.strong_levels) ? levels.strong_levels : [];
+  const support = supports.length ? supports[supports.length - 1] : null;
+  const resistance = resistances.length ? resistances[0] : null;
+  const strongText = strong.length && strong[0]?.price ? `; сильный уровень: ${priceNumber(strong[0].price)}` : "";
+  if (support === null && resistance === null) return "Уровни: нет числовых support/resistance";
+  return `Поддержка: ${priceNumber(support)}; сопротивление: ${priceNumber(resistance)}${strongText}`;
+}
+
+function volumeMtfText(tf15 = {}, tf1 = {}) {
+  for (const tf of [tf15, tf1]) {
+    const payload = tf.volume || {};
+    if (payload.ratio !== null && payload.ratio !== undefined) return `Объем ${tf.label || "ТФ"}: ${metricNumber(payload.ratio)}x к базе`;
+  }
+  return "Объем: нет данных";
+}
+
+function atrMtfText(tf15 = {}, tf1 = {}) {
+  for (const tf of [tf15, tf1]) {
+    const payload = tf.atr || {};
+    if (payload.value !== null && payload.value !== undefined) return `ATR ${payload.timeframe || tf.label || "ТФ"}: ${priceNumber(payload.value)} (${metricNumber(payload.pct)}% цены)`;
+  }
+  return "ATR: нет данных";
+}
+
+function priceNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "нет данных";
+  if (Math.abs(number) >= 100) return number.toFixed(2).replace(/\.?0+$/, "");
+  if (Math.abs(number) >= 1) return number.toFixed(4).replace(/\.?0+$/, "");
+  return number.toFixed(8).replace(/\.?0+$/, "");
+}
+
 function structureSignalRu(value) {
   return ({
     bearish_break: "слом структуры вниз",
     bullish_hh_hl: "структура выше high/low",
     bullish_sweep_reclaim: "снятие ликвидности и возврат"
-  })[value] || "структура не подтверждена";
+  })[value] || "структура: нет подтвержденного HH/HL или LH/LL";
 }
 
 function rsiSignalRu(value) {
@@ -928,7 +1060,8 @@ function researchCardHtml(card) {
   const stages = pipeline.stages || [];
   const decision = normalizedDecisionLayer(card);
   const blocks = decision.blocks || {};
-  const tags = [normalizeRiskTag(blocks.project?.tag), normalizeRiskTag(blocks.fundamental?.tag), blocks.social?.tag || blocks.social?.scenario_label_ru, blocks.ta?.tag]
+  const categoryTag = primaryCategory(card.fundamentals?.metrics || {});
+  const tags = [categoryTag ? `${categoryTag}-категория` : normalizeRiskTag(blocks.project?.tag), normalizeRiskTag(blocks.fundamental?.tag), blocks.social?.tag || blocks.social?.scenario_label_ru, blocks.ta?.tag]
     .filter(Boolean)
     .slice(0, 4);
   return `<article class="pipeline-card" data-symbol="${card.symbol}" data-run-id="${card.run_id || ""}" data-research-id="${card.research_id || ""}">
@@ -1045,8 +1178,9 @@ function stageSummary(stage, blockingStage = null) {
   </div>`;
 }
 
-function researchChartsSummary(stage) {
+function researchChartsSummary(stage, statusCode = null) {
   const metrics = stage?.metrics || {};
+  if (statusCode) metrics.scenario = { ...(metrics.scenario || {}), code: statusCode };
   return `<div class="stage-summary chart-summary">
     <div class="chart-window-meta">
       <span>Окно: ${escapeHtml(metrics.window_hours ? `${metrics.window_hours}ч` : "нет данных")}</span>
@@ -1139,7 +1273,7 @@ function overlayChart(metrics) {
       ${eventStripItem("P: всплеск цены", events.price_event)}
       ${eventStripItem("V: всплеск объема", events.volume_event)}
     </div>
-    <p class="chart-now">Сейчас: ${escapeHtml(currentChartState(metrics))}</p>
+    <p class="chart-now">Текущее состояние: ${escapeHtml(currentChartState(metrics))}</p>
   </section>`;
 }
 
@@ -1168,8 +1302,8 @@ function currentChartState(metrics) {
     events.price_event ? ["цена впереди", Number(events.price_event.index)] : null,
     events.volume_event ? ["объем подтвердил", Number(events.volume_event.index)] : null
   ].filter((item) => item && Number.isFinite(item[1])).sort((a, b) => a[1] - b[1]);
-  if (order.length) return `${order[0][0]}; сценарий: ${scenario.label}.`;
-  return `подтверждения нет; сценарий: ${scenario.label}.`;
+  if (order.length) return `${order[0][0]}; статус: ${scenario.label}. Расчет по последней точке нормализованного графика и M/P/V-маркерам.`;
+  return `подтверждения нет; статус: ${scenario.label}. Расчет по последней точке нормализованного графика и M/P/V-маркерам.`;
 }
 
 function hydrateSocialCharts(root = document) {
@@ -1263,12 +1397,36 @@ function chartExplanationText() {
 
 function scenarioRu(code) {
   return ({
+    early_social_signal: {
+      label: "Соцсигнал раньше рынка",
+      summary: "Упоминания растут раньше цены и объема. Это watch-сигнал до подтверждения рынком."
+    },
+    confirmed_narrative: {
+      label: "Нарратив подтвержден",
+      summary: "Упоминания пришли первыми, затем цена и объем подтвердили движение."
+    },
+    price_before_social: {
+      label: "Цена раньше соцсетей",
+      summary: "Цена двинулась раньше публичного внимания. Нужен ретест, без FOMO."
+    },
+    growth_without_social_confirmation: {
+      label: "Рост без соцподтверждения",
+      summary: "Цена растет без нормального подтверждения упоминаниями и объемом."
+    },
+    correction_without_social_panic: {
+      label: "Коррекция без соцпаники",
+      summary: "Цена корректируется, а упоминания не ускоряются; это не памп, а слабая social-реакция."
+    },
+    late_hype: {
+      label: "Поздний хайп",
+      summary: "Соцсети догоняют уже прошедшее движение. Риск позднего входа высокий."
+    },
     early_narrative: {
-      label: "Ранний соцсигнал",
+      label: "Соцсигнал раньше рынка",
       summary: "Упоминания растут раньше цены и объема. Это сигнал для наблюдения, вход только после подтверждения рынком."
     },
     narrative: {
-      label: "Подтвержденный нарратив",
+      label: "Нарратив подтвержден",
       summary: "Упоминания пришли первыми, затем цена и объем подтвердили движение."
     },
     exhaustion_late_hype: {
@@ -1276,7 +1434,7 @@ function scenarioRu(code) {
       summary: "Цена уже прошла движение, а соцсети догоняют. Риск позднего входа высокий."
     },
     fake_pump: {
-      label: "Подозрительный памп",
+      label: "Рост без соцподтверждения",
       summary: "Цена двинулась без нормального подтверждения объемом и соцсетями."
     },
     insider_pump: {
@@ -1927,18 +2085,45 @@ function cvdBiasFromValue(value) {
   return "neutral";
 }
 
-function cvdMetricLabel(value, bias = cvdBiasFromValue(value)) {
-  if (value === null || value === undefined || value === "" || bias === "unknown") return "CVD: нет данных";
-  if (bias === "positive") return "CVD: покупатели давят";
-  if (bias === "negative") return "CVD: продавцы давят";
-  return "CVD: нейтрально";
+function cvdBiasFromCvd(cvdValue, buyVolume, sellVolume) {
+  const buyPct = cvdSidePct(buyVolume, sellVolume, "buy");
+  const sellPct = cvdSidePct(buyVolume, sellVolume, "sell");
+  const cvd = Number(cvdValue);
+  const total = Number(buyVolume || 0) + Number(sellVolume || 0);
+  const deltaPct = total > 0 && Number.isFinite(cvd) ? (cvd / total) * 100 : null;
+  if (buyPct !== null && (buyPct >= 55 || deltaPct >= 10)) return "positive";
+  if (sellPct !== null && (sellPct >= 55 || deltaPct <= -10)) return "negative";
+  return cvdBiasFromValue(cvdValue) === "unknown" ? "unknown" : "neutral";
 }
 
-function cvdMetricNote(value, bias = cvdBiasFromValue(value)) {
+function cvdSidePct(buyVolume, sellVolume, side) {
+  const buy = Number(buyVolume);
+  const sell = Number(sellVolume);
+  if (!Number.isFinite(buy) || !Number.isFinite(sell) || buy + sell <= 0) return null;
+  return side === "buy" ? (buy / (buy + sell)) * 100 : (sell / (buy + sell)) * 100;
+}
+
+function cvdMetricLabel(value, bias = cvdBiasFromValue(value), buyPct = null, sellPct = null) {
+  if (value === null || value === undefined || value === "" || bias === "unknown") return "Нет данных";
+  const status = bias === "positive" ? "Покупатели доминируют" : bias === "negative" ? "Продавцы доминируют" : "Баланс";
+  const ratio = buyPct !== null && sellPct !== null ? `${metricNumber(buyPct)}% / ${metricNumber(sellPct)}%` : "доли не рассчитаны";
+  return `${status}: ${ratio}, CVD ${signedMetricNumber(value)}`;
+}
+
+function cvdMetricNote(value, bias = cvdBiasFromValue(value), buyPct = null, sellPct = null) {
   if (value === null || value === undefined || value === "" || bias === "unknown") {
-    return "CVD — баланс рыночных покупок и продаж; источник не вернул значение.";
+    return "Источник не вернул recent trades.";
   }
-  return `Баланс рыночных покупок и продаж: ${metricNumber(value)}.`;
+  return "рыночные покупки / рыночные продажи";
+}
+
+function signedMetricNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "нет данных";
+  const prefix = number > 0 ? "+" : "";
+  if (Math.abs(number) >= 1_000_000) return `${prefix}${(number / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (Math.abs(number) >= 1_000) return `${prefix}${(number / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  return `${prefix}${metricNumber(number)}`;
 }
 
 function stageLabel(stage) {

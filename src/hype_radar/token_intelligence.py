@@ -445,6 +445,8 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
     lunar_metrics = extract_lunarcrush_metrics(token_data.get("lunarcrush") or {})
     description = clean_text(nested_text(coin_data.get("description"), "en"))
     project_summary = first_text(description, lunar_metrics.get("project_summary"))
+    primary_category = primary_project_category(categories)
+    category_quality = category_quality_label(primary_category)
     sector = categories[0] if categories else None
     chain, address = first_contract_address(coin_data)
     link_metrics = coingecko_link_metrics(links)
@@ -468,6 +470,7 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
                 "symbol": token_data.get("base_coin"),
                 "name": identity.get("name"),
                 "sector": sector,
+                "primary_category": primary_category,
                 "trend": trend,
                 "source_conflict": source_conflict,
                 "attention_phase": attention,
@@ -496,6 +499,9 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "project_brief_ru": project_brief,
         "sector": sector,
         "sector_source": "CoinGecko" if sector else "нет данных",
+        "primary_category": primary_category,
+        "primary_category_source": "CoinGecko categories" if primary_category else "нет данных",
+        "category_quality": category_quality,
         "narrative": trend.get("label"),
         "chain_ecosystem": chain or sector,
         "chain_source": "CoinGecko platforms" if chain else "CoinGecko category" if sector else "нет данных",
@@ -532,8 +538,12 @@ def extract_fundamental_metrics(token_data: Dict[str, Any], normalize_text: bool
         "social_authors_24h": lunar_metrics.get("social_contributors_24h"),
         "social_interactions_24h": lunar_metrics.get("social_interactions_24h"),
         "top_posts": lunar_metrics.get("top_posts"),
+        "top_posts_structured": align_top_posts(lunar_metrics.get("top_posts_structured") or [], top_posts_ru),
         "top_posts_ru": top_posts_ru,
         "top_posts_summary_ru": top_posts_summary_ru,
+        "alt_rank": lunar_metrics.get("alt_rank"),
+        "alt_rank_captured_at": lunar_metrics.get("alt_rank_captured_at"),
+        "alt_rank_source": lunar_metrics.get("alt_rank_source"),
         "movement_supportive": supporting_factors[:8],
         "movement_supportive_ru": movement_supportive_ru,
         "movement_suspicious": suspicious_factors[:8],
@@ -707,7 +717,8 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
     alerts = find_first_list(root, ["alerts", "events"]) or []
     topics = lunar_topic_labels(topic_data) or find_first_list(root, ["top_topics", "topics", "categories"]) or []
     influencers = find_first_list(root, ["influencers", "creators", "top_influencers"]) or []
-    top_posts = compact_texts([nested_text(post, "post_title") for post in post_rows], 8)
+    top_posts_structured = structured_lunar_posts(post_rows, 8)
+    top_posts = [post["original_text"] for post in top_posts_structured]
     post_sentiments = [first_number(post.get("post_sentiment")) for post in post_rows if isinstance(post, dict)]
     post_sentiments = [value for value in post_sentiments if value is not None]
     avg_post_sentiment = sum(post_sentiments) / len(post_sentiments) if post_sentiments else None
@@ -764,7 +775,11 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
         find_number_by_key(root, ["sentiment"]),
     )
     galaxy_score = first_number(coin_data.get("galaxy_score"), find_number_by_key(metrics, ["galaxy_score"]), find_number_by_key(root, ["galaxy_score"]))
-    alt_rank = first_number(coin_data.get("alt_rank"), find_number_by_key(metrics, ["alt_rank"]), find_number_by_key(root, ["alt_rank"]))
+    current_alt_rank = first_number(coin_data.get("alt_rank"), find_number_by_key(metrics, ["alt_rank"]), find_number_by_key(root, ["alt_rank"]))
+    time_series_alt_rank = latest_time_series_alt_rank(time_series_rows)
+    alt_rank = current_alt_rank if current_alt_rank is not None else time_series_alt_rank.get("value")
+    alt_rank_source = "lunarcrush_current" if current_alt_rank is not None else time_series_alt_rank.get("source")
+    alt_rank_captured_at = time_series_alt_rank.get("captured_at")
     social_dominance = first_number(
         find_number_by_key(metrics, ["social_dominance"]),
         find_number_by_key(root, ["social_dominance"]),
@@ -778,6 +793,7 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
         "critical_causes": critical,
         "alerts": alert_titles,
         "top_posts": top_posts,
+        "top_posts_structured": top_posts_structured,
         "topics": topic_names,
         "influencers_count": len(influencers),
         "sector": first_text(*(topic_names[:2])) or nested_text(asset, "category") or nested_text(asset, "sector"),
@@ -790,6 +806,8 @@ def extract_lunarcrush_metrics(payload: Dict[str, Any]) -> Dict[str, Any]:
         "sentiment": sentiment,
         "galaxy_score": galaxy_score,
         "alt_rank": alt_rank,
+        "alt_rank_captured_at": alt_rank_captured_at,
+        "alt_rank_source": alt_rank_source,
         "social_dominance": social_dominance,
     }
 
@@ -1224,6 +1242,15 @@ def normalized_list(translated: Any, fallback: Any, max_items: int = 6) -> List[
     return dedupe_texts(rows)[:max_items]
 
 
+def align_top_posts(posts: List[Dict[str, Any]], translated_ru: List[str]) -> List[Dict[str, Any]]:
+    aligned: List[Dict[str, Any]] = []
+    for index, post in enumerate(posts[:5]):
+        item = dict(post)
+        item["translated_ru"] = translated_ru[index] if index < len(translated_ru) else str(item.get("translated_ru") or "")
+        aligned.append(item)
+    return aligned
+
+
 def score_level(value: float, kind: str) -> str:
     value = float(value or 0.0)
     if kind == "risk":
@@ -1305,6 +1332,50 @@ def is_market_alert_text(text: str) -> bool:
     return any(term in lowered for term in market_terms)
 
 
+def structured_lunar_posts(post_rows: List[Any], limit: int) -> List[Dict[str, Any]]:
+    posts: List[Dict[str, Any]] = []
+    for row in post_rows:
+        if not isinstance(row, dict):
+            continue
+        original = clean_text(first_text(nested_text(row, "post_title"), nested_text(row, "title"), nested_text(row, "text"), nested_text(row, "body")) or "")
+        if not original:
+            continue
+        url = first_text(
+            nested_text(row, "post_url"),
+            nested_text(row, "url"),
+            nested_text(row, "post_link"),
+            nested_text(row, "link"),
+            nested_text(row, "permalink"),
+        )
+        if url and not str(url).startswith(("http://", "https://")):
+            url = None
+        creator = first_text(nested_text(row, "creator_display_name"), nested_text(row, "creator_name"), nested_text(row, "author"), nested_text(row, "username"))
+        posts.append({
+            "original_text": original[:280],
+            "translated_ru": "",
+            "creator": creator or "",
+            "url": url or "",
+        })
+        if len(posts) >= limit:
+            break
+    return posts
+
+
+def latest_time_series_alt_rank(rows: List[Any]) -> Dict[str, Any]:
+    candidates: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        value = first_number(row.get("alt_rank"))
+        if value is None:
+            continue
+        candidates.append({"value": value, "captured_at": row.get("time"), "source": "lunarcrush_time_series"})
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: first_number(item.get("captured_at")) or 0.0)
+    return candidates[-1]
+
+
 def movement_type_reasons_for(
     circ_ratio: Optional[float],
     volume_to_market_cap: Optional[float],
@@ -1330,6 +1401,62 @@ def movement_type_reasons_for(
     if tokenomics_risk >= 65:
         reasons.append("Риск токеномики высокий: фундаментал нельзя считать чистым подтверждением движения.")
     return reasons[:6]
+
+
+def primary_project_category(categories: List[str]) -> Optional[str]:
+    cleaned = [clean_text(str(item)) for item in (categories or [])]
+    cleaned = [item for item in cleaned if item]
+    if not cleaned:
+        return None
+    priority = [
+        ("AI", ("artificial intelligence", "ai ", " ai", "ai/")),
+        ("RWA", ("real world assets", "rwa")),
+        ("Privacy", ("privacy", "zero knowledge", "zk")),
+        ("DePIN", ("depin",)),
+        ("Infrastructure", ("infrastructure", "modular blockchain", "data availability")),
+        ("Meme", ("meme",)),
+        ("Gaming/GameFi", ("gaming", "gamefi", "play to earn", "nft gaming")),
+        ("DeFi", ("defi", "decentralized finance", "dex", "lending", "yield")),
+    ]
+    for label, terms in priority:
+        for category in cleaned:
+            lowered = category.lower()
+            if any(term in lowered for term in terms):
+                return label
+    for category in cleaned:
+        lowered = category.lower()
+        if not any(
+            term in lowered
+            for term in (
+                "ecosystem",
+                "chain",
+                "airdrop",
+                "airdrop",
+                "portfolio",
+                "made in",
+                "hodler",
+                "binance",
+                "solana",
+                "ethereum",
+                "base",
+                "abstract",
+                "layer 1",
+                "layer 2",
+            )
+        ):
+            return category
+    return cleaned[0]
+
+
+def category_quality_label(category: Optional[str]) -> str:
+    if not category:
+        return "unknown"
+    lowered = category.lower()
+    if any(term in lowered for term in ("ai", "rwa", "privacy", "depin", "infrastructure")):
+        return "positive"
+    if any(term in lowered for term in ("meme", "gaming", "gamefi", "defi")):
+        return "speculative"
+    return "neutral"
 
 
 def project_quality_score(

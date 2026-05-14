@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -170,8 +171,21 @@ def score_snapshot(snapshot: MarketSnapshot) -> Candidate:
 
 
 def build_technical_analysis(candles: Dict[str, Sequence[Candle]]) -> Dict[str, object]:
+    candles_5m = list(candles.get("5") or [])
+    candles_15m = list(candles.get("15") or [])
     candles_1h = list(candles.get("60") or [])
+    candles_4h = list(candles.get("240") or [])
     candles_1d = list(candles.get("D") or [])
+    last_close = _last_close(candles_5m, candles_15m, candles_1h, candles_4h, candles_1d)
+    multi_timeframe = {
+        "240": _timeframe_analysis(candles_4h, "4ч"),
+        "60": _timeframe_analysis(candles_1h, "1ч"),
+        "15": _timeframe_analysis(candles_15m, "15м"),
+        "5": _timeframe_analysis(candles_5m, "5м"),
+    }
+    levels = _aggregate_levels(multi_timeframe, last_close)
+    indicators = _aggregate_indicators(multi_timeframe)
+    trade_setup = _mtf_trade_setup(multi_timeframe, levels, last_close)
     signals = {
         "breakout_20d_high": _breakout_20d_high(candles_1d),
         "atr_volatility_expansion": _atr_volatility_expansion(candles_1h),
@@ -187,9 +201,314 @@ def build_technical_analysis(candles: Dict[str, Sequence[Candle]]) -> Dict[str, 
     return {
         "status": status,
         "principle": "derivatives_and_market_metrics_define_what_to_trade;technical_analysis_defines_when_and_where",
-        "timeframes": {"primary": "60", "breakout": "D"},
+        "timeframes": {"macro": "240", "working": "60", "entry": "15", "micro": "5", "breakout": "D"},
         "signals": signals,
+        "multi_timeframe": multi_timeframe,
+        "levels": levels,
+        "indicators": indicators,
+        "trade_setup": trade_setup,
     }
+
+
+def _last_close(*series: Sequence[Candle]) -> Optional[float]:
+    for candles in series:
+        if candles:
+            return candles[-1].close
+    return None
+
+
+def _timeframe_analysis(candles: Sequence[Candle], label: str) -> Dict[str, object]:
+    rows = list(candles or [])
+    last_close = rows[-1].close if rows else None
+    closes = [candle.close for candle in rows]
+    ema20 = _ema_series(closes, 20)[-1] if len(closes) >= 20 else None
+    ema50 = _ema_series(closes, 50)[-1] if len(closes) >= 50 else None
+    swings = _recent_swings(rows)
+    structure = _structure_from_swings(swings, rows)
+    trend = _trend_from_ema(last_close, ema20, ema50, structure)
+    atr_value = atr(rows) if len(rows) >= 15 else None
+    rsi_value = rsi(rows) if len(rows) >= 15 else None
+    support, resistance = _nearest_levels(rows, swings, last_close)
+    return {
+        "status": "available" if len(rows) >= 35 else "partial" if rows else "insufficient_data",
+        "label": label,
+        "candle_count": len(rows),
+        "last_close": rounded_price(last_close) if last_close is not None else None,
+        "trend": trend,
+        "structure": structure,
+        "ema": {
+            "ema20": rounded_price(ema20) if ema20 is not None else None,
+            "ema50": rounded_price(ema50) if ema50 is not None else None,
+        },
+        "rsi": _rsi_payload(rsi_value, label),
+        "atr": _atr_payload(atr_value, last_close, label),
+        "divergence": _rsi_divergence_detail(rows, label),
+        "levels": {
+            "support": rounded_price(support) if support is not None else None,
+            "resistance": rounded_price(resistance) if resistance is not None else None,
+            "swing_highs": [rounded_price(value) for value in swings["highs"][-4:]],
+            "swing_lows": [rounded_price(value) for value in swings["lows"][-4:]],
+        },
+        "volume": _timeframe_volume_payload(rows),
+    }
+
+
+def _trend_from_ema(last_close: Optional[float], ema20: Optional[float], ema50: Optional[float], structure: str) -> str:
+    if last_close is not None and ema20 is not None and ema50 is not None:
+        if ema20 > ema50 and last_close >= ema20:
+            return "uptrend"
+        if ema20 < ema50 and last_close <= ema20:
+            return "downtrend"
+    if structure == "higher_high_higher_low":
+        return "uptrend"
+    if structure == "lower_high_lower_low":
+        return "downtrend"
+    return "range"
+
+
+def _recent_swings(candles: Sequence[Candle], window: int = 2) -> Dict[str, List[float]]:
+    highs: List[float] = []
+    lows: List[float] = []
+    rows = list(candles or [])
+    if len(rows) < window * 2 + 1:
+        return {"highs": highs, "lows": lows}
+    for index in range(window, len(rows) - window):
+        cluster = rows[index - window : index + window + 1]
+        current = rows[index]
+        if current.high >= max(candle.high for candle in cluster):
+            highs.append(current.high)
+        if current.low <= min(candle.low for candle in cluster):
+            lows.append(current.low)
+    return {"highs": highs[-8:], "lows": lows[-8:]}
+
+
+def _structure_from_swings(swings: Dict[str, List[float]], candles: Sequence[Candle]) -> str:
+    highs = swings.get("highs") or []
+    lows = swings.get("lows") or []
+    if len(highs) >= 2 and len(lows) >= 2:
+        if highs[-1] > highs[-2] and lows[-1] > lows[-2]:
+            return "higher_high_higher_low"
+        if highs[-1] < highs[-2] and lows[-1] < lows[-2]:
+            return "lower_high_lower_low"
+    rows = list(candles or [])
+    if len(rows) >= 12:
+        previous = rows[-12:-6]
+        recent = rows[-6:]
+        if max(candle.high for candle in recent) > max(candle.high for candle in previous) and min(candle.low for candle in recent) > min(candle.low for candle in previous):
+            return "higher_high_higher_low"
+        if max(candle.high for candle in recent) < max(candle.high for candle in previous) and min(candle.low for candle in recent) < min(candle.low for candle in previous):
+            return "lower_high_lower_low"
+    return "range"
+
+
+def _rsi_payload(value: Optional[float], timeframe: str) -> Dict[str, object]:
+    if value is None:
+        return {"status": "insufficient_data", "timeframe": timeframe, "value": None, "zone": "нет данных"}
+    if value >= 70.0:
+        zone = "перегрев"
+    elif value >= 55.0:
+        zone = "сильная зона"
+    elif value > 45.0:
+        zone = "нейтральная зона"
+    elif value > 30.0:
+        zone = "слабая зона"
+    else:
+        zone = "перепроданность"
+    return {"status": "available", "timeframe": timeframe, "value": round(value, 2), "zone": zone}
+
+
+def _atr_payload(value: Optional[float], close: Optional[float], timeframe: str) -> Dict[str, object]:
+    if value is None:
+        return {"status": "insufficient_data", "timeframe": timeframe, "value": None, "pct": None}
+    return {"status": "available", "timeframe": timeframe, "value": rounded_price(value), "pct": round(safe_div(value, close or 0.0, 0.0) * 100.0, 2)}
+
+
+def _rsi_divergence_detail(candles: Sequence[Candle], timeframe: str) -> Dict[str, object]:
+    signal = _rsi_divergence(candles)
+    value = signal.get("value") if isinstance(signal, dict) else None
+    return {
+        "status": signal.get("status") if isinstance(signal, dict) else "insufficient_data",
+        "indicator": "RSI",
+        "timeframe": timeframe,
+        "value": value or "none",
+        "current_rsi": signal.get("current_rsi") if isinstance(signal, dict) else None,
+        "prior_rsi": signal.get("prior_rsi") if isinstance(signal, dict) else None,
+    }
+
+
+def _nearest_levels(candles: Sequence[Candle], swings: Dict[str, List[float]], price: Optional[float]) -> tuple[Optional[float], Optional[float]]:
+    if price is None:
+        return None, None
+    lows = [value for value in (swings.get("lows") or []) if value < price]
+    highs = [value for value in (swings.get("highs") or []) if value > price]
+    rows = list(candles or [])
+    if rows:
+        recent = rows[-30:]
+        lows.extend(candle.low for candle in recent if candle.low < price)
+        highs.extend(candle.high for candle in recent if candle.high > price)
+    support = max(lows) if lows else None
+    resistance = min(highs) if highs else None
+    return support, resistance
+
+
+def _timeframe_volume_payload(candles: Sequence[Candle]) -> Dict[str, object]:
+    rows = list(candles or [])
+    if len(rows) < 21:
+        return {"status": "insufficient_data", "ratio": None}
+    baseline = _avg([candle.volume for candle in rows[-21:-1]])
+    ratio = safe_div(rows[-1].volume, baseline, 0.0)
+    return {"status": "available", "ratio": round(ratio, 2), "confirmed": ratio >= 1.5}
+
+
+def _aggregate_levels(mtf: Dict[str, Dict[str, object]], price: Optional[float]) -> Dict[str, object]:
+    supports = _dedupe_levels([_nested_level(mtf, key, "support") for key in ("240", "60", "15", "5")])
+    resistances = _dedupe_levels([_nested_level(mtf, key, "resistance") for key in ("240", "60", "15", "5")])
+    if price is not None:
+        supports = [value for value in supports if value < price]
+        resistances = [value for value in resistances if value > price]
+    round_levels = _round_levels(price)
+    strong = _strong_levels(supports + resistances + round_levels, mtf, price)
+    return {
+        "supports": supports[:5],
+        "resistances": resistances[:5],
+        "round_levels": round_levels,
+        "strong_levels": strong[:6],
+    }
+
+
+def _nested_level(mtf: Dict[str, Dict[str, object]], timeframe: str, key: str) -> Optional[float]:
+    level = ((mtf.get(timeframe) or {}).get("levels") or {}).get(key)
+    return float(level) if isinstance(level, (int, float)) and level > 0 else None
+
+
+def _dedupe_levels(values: Sequence[Optional[float]]) -> List[float]:
+    levels = sorted({rounded_price(value) for value in values if value is not None and value > 0})
+    return [float(value) for value in levels]
+
+
+def _round_levels(price: Optional[float]) -> List[float]:
+    if price is None or price <= 0:
+        return []
+    magnitude = 10 ** int(math.floor(math.log10(price)))
+    step = magnitude / 10.0
+    if price < 1:
+        step = magnitude
+    levels = []
+    for offset in range(-3, 4):
+        level = rounded_price(round(price / step + offset) * step)
+        if level > 0:
+            levels.append(float(level))
+    return sorted(set(levels))
+
+
+def _strong_levels(levels: Sequence[float], mtf: Dict[str, Dict[str, object]], price: Optional[float]) -> List[Dict[str, object]]:
+    output: List[Dict[str, object]] = []
+    if price is None or price <= 0:
+        return output
+    tolerance = max(price * 0.004, 1e-12)
+    for level in _dedupe_levels(levels):
+        touches = 0
+        sources: List[str] = []
+        for timeframe, data in mtf.items():
+            tf_levels = (data.get("levels") or {}) if isinstance(data, dict) else {}
+            values = list(tf_levels.get("swing_highs") or []) + list(tf_levels.get("swing_lows") or [])
+            if any(abs(float(value) - level) <= tolerance for value in values if isinstance(value, (int, float))):
+                touches += 1
+                sources.append(str((data.get("label") or timeframe)))
+        round_confluence = any(abs(level - round_level) <= tolerance for round_level in _round_levels(price))
+        if touches >= 2 or round_confluence:
+            output.append({"price": level, "touches": touches, "round_level": round_confluence, "sources": sources[:3]})
+    return output
+
+
+def _aggregate_indicators(mtf: Dict[str, Dict[str, object]]) -> Dict[str, object]:
+    return {
+        "rsi": {key: value.get("rsi") for key, value in mtf.items()},
+        "atr": {key: value.get("atr") for key, value in mtf.items()},
+        "ema_trend": {key: {"trend": value.get("trend"), "ema": value.get("ema")} for key, value in mtf.items()},
+        "divergences": {key: value.get("divergence") for key, value in mtf.items()},
+    }
+
+
+def _mtf_trade_setup(mtf: Dict[str, Dict[str, object]], levels: Dict[str, object], price: Optional[float]) -> Dict[str, object]:
+    if price is None or price <= 0:
+        return {"status": "no_setup", "side": "neutral", "reason": "Нет текущей цены для расчета сделки."}
+    macro = mtf.get("240") or {}
+    working = mtf.get("60") or {}
+    short_score = _direction_points(macro, working, "short")
+    long_score = _direction_points(macro, working, "long")
+    if short_score > long_score and short_score >= 2:
+        return _setup_from_levels("short", price, mtf, levels)
+    if long_score > short_score and long_score >= 2:
+        return _setup_from_levels("long", price, mtf, levels)
+    return {"status": "no_setup", "side": "neutral", "reason": "Старшие ТФ не дают явного преимущества long или short."}
+
+
+def _direction_points(macro: Dict[str, object], working: Dict[str, object], side: str) -> int:
+    trend = "uptrend" if side == "long" else "downtrend"
+    structure = "higher_high_higher_low" if side == "long" else "lower_high_lower_low"
+    return int(macro.get("trend") == trend) + int(working.get("trend") == trend) + int(macro.get("structure") == structure) + int(working.get("structure") == structure)
+
+
+def _setup_from_levels(side: str, price: float, mtf: Dict[str, Dict[str, object]], levels: Dict[str, object]) -> Dict[str, object]:
+    supports = [float(value) for value in levels.get("supports") or [] if isinstance(value, (int, float))]
+    resistances = [float(value) for value in levels.get("resistances") or [] if isinstance(value, (int, float))]
+    atr_source = (((mtf.get("15") or {}).get("atr") or {}).get("value") or ((mtf.get("60") or {}).get("atr") or {}).get("value"))
+    atr_value = float(atr_source) if isinstance(atr_source, (int, float)) and atr_source > 0 else price * 0.01
+    buffer = max(atr_value * 0.35, price * 0.0015)
+    if side == "long":
+        level = max(supports) if supports else None
+        entry = level if level is not None and abs(price - level) / price <= 0.025 else price
+        stop = (level - buffer) if level is not None else price - atr_value
+        risk = max(entry - stop, price * 0.002)
+        targets = [value for value in sorted(resistances) if value > entry]
+        take_profit = _first_rr_target(entry, targets, risk, side)
+    else:
+        level = min(resistances) if resistances else None
+        entry = level if level is not None and abs(level - price) / price <= 0.025 else price
+        stop = (level + buffer) if level is not None else price + atr_value
+        risk = max(stop - entry, price * 0.002)
+        targets = [value for value in sorted(supports, reverse=True) if value < entry]
+        take_profit = _first_rr_target(entry, targets, risk, side)
+    if take_profit is None:
+        return {
+            "status": "no_setup",
+            "side": side,
+            "entry": rounded_price(entry),
+            "stop_loss": rounded_price(stop),
+            "risk_reward": None,
+            "reason": "Нет подтвержденной цели с R:R >= 1:3.",
+        }
+    reward = (take_profit - entry) if side == "long" else (entry - take_profit)
+    rr = safe_div(reward, risk, 0.0)
+    if rr < 3.0:
+        return {
+            "status": "no_setup",
+            "side": side,
+            "entry": rounded_price(entry),
+            "stop_loss": rounded_price(stop),
+            "take_profits": [rounded_price(take_profit)],
+            "risk_reward": round(rr, 2),
+            "reason": "R:R ниже 1:3.",
+        }
+    return {
+        "status": "candidate",
+        "side": side,
+        "entry": rounded_price(entry),
+        "stop_loss": rounded_price(stop),
+        "take_profits": [rounded_price(take_profit)],
+        "risk_reward": round(rr, 2),
+        "invalidation": rounded_price(stop),
+        "reason": "Старшие ТФ и уровни дают расчетный сетап с R:R >= 1:3.",
+    }
+
+
+def _first_rr_target(entry: float, targets: Sequence[float], risk: float, side: str) -> Optional[float]:
+    for target in targets:
+        reward = target - entry if side == "long" else entry - target
+        if reward / risk >= 3.0:
+            return target
+    return None
 
 
 def select_strategy_identifier(

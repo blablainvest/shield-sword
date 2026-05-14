@@ -156,6 +156,37 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(block["signals"]["volume_spike"]["status"], "available")
         self.assertTrue(block["signals"]["volume_spike"]["value"])
         self.assertIn(block["signals"]["ema_cross"]["value"], {"bullish", "bearish", "none"})
+        self.assertIn("multi_timeframe", block)
+        self.assertIn("levels", block)
+        self.assertIn("indicators", block)
+        self.assertIn("trade_setup", block)
+
+    def test_mtf_analysis_reports_trend_levels_and_timeframed_indicators(self):
+        macro = candles_from_closes([1.40 - index * 0.002 for index in range(80)], 5000)
+        hourly = candles_from_closes([1.22 - index * 0.001 for index in range(120)] + [1.05, 1.04, 1.03], 6000)
+        fifteen = candles_from_closes([1.07, 1.06, 1.055, 1.05, 1.045, 1.04, 1.035, 1.03] * 8, 3000)
+        five = candles_from_closes([1.04, 1.035, 1.03, 1.032, 1.028, 1.025] * 20, 2000)
+
+        block = build_technical_analysis({"240": macro, "60": hourly, "15": fifteen, "5": five, "D": candles_from_closes([1.0] * 30)})
+        mtf = block["multi_timeframe"]
+
+        self.assertEqual(mtf["240"]["trend"], "downtrend")
+        self.assertEqual(mtf["60"]["rsi"]["timeframe"], "1ч")
+        self.assertIn("zone", mtf["60"]["rsi"])
+        self.assertEqual(mtf["60"]["divergence"]["indicator"], "RSI")
+        self.assertEqual(mtf["60"]["divergence"]["timeframe"], "1ч")
+        self.assertTrue(block["levels"]["supports"] or block["levels"]["resistances"])
+
+    def test_mtf_trade_setup_rejects_without_three_rr_target(self):
+        flat = candles_from_closes([1.0 + (0.001 if index % 2 else 0.0) for index in range(80)], 3000)
+
+        block = build_technical_analysis({"240": flat, "60": flat, "15": flat[-60:], "5": flat[-60:], "D": candles_from_closes([1.0] * 30)})
+        setup = block["trade_setup"]
+
+        self.assertEqual(setup["status"], "no_setup")
+        self.assertIn(setup["side"], {"neutral", "long", "short"})
+        if setup.get("risk_reward") is not None:
+            self.assertLess(setup["risk_reward"], 3.0)
 
     def test_technical_analysis_block_degrades_when_history_is_missing(self):
         block = build_technical_analysis({"60": candles_from_closes([1.0, 1.01]), "D": []})

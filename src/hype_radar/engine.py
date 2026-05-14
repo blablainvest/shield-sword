@@ -513,6 +513,7 @@ class HypeRadarEngine:
         long_short_ratio: Optional[LongShortRatio] = None,
     ) -> Optional[Candidate]:
         candles = {
+            "5": self.bybit.klines(ticker.symbol, "5", limit=120),
             "15": self.bybit.klines(ticker.symbol, "15", limit=96),
             "60": self.bybit.klines(ticker.symbol, "60", limit=200),
             "240": self.bybit.klines(ticker.symbol, "240", limit=120),

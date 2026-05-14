@@ -683,7 +683,10 @@ def _derivatives_decision_layer(final: Dict[str, Any], preferred_side: str) -> D
     derivatives = (technical.get("derivatives_filter") or {}).get("metrics") or {}
     cvd = derivatives.get("cvd") or {}
     cvd_base = _number(cvd.get("cvd_base"))
-    cvd_bias = "positive" if cvd_base is not None and cvd_base > 0 else "negative" if cvd_base is not None and cvd_base < 0 else "neutral"
+    buy_volume = _number(cvd.get("buy_volume_base"))
+    sell_volume = _number(cvd.get("sell_volume_base"))
+    cvd_view = _cvd_view(cvd_base, buy_volume, sell_volume, cvd.get("status"))
+    cvd_bias = cvd_view["bias"]
     conflict = (preferred_side == "long" and cvd_bias == "negative") or (preferred_side == "short" and cvd_bias == "positive")
     return {
         "status": (technical.get("derivatives_filter") or {}).get("status") or "unavailable",
@@ -693,7 +696,12 @@ def _derivatives_decision_layer(final: Dict[str, Any], preferred_side: str) -> D
         "short_ratio": derivatives.get("short_ratio"),
         "cvd_status": cvd.get("status") or "unavailable",
         "cvd_base": cvd_base,
+        "cvd_buy_volume": buy_volume,
+        "cvd_sell_volume": sell_volume,
+        "cvd_buy_pct": cvd_view["buy_pct"],
+        "cvd_sell_pct": cvd_view["sell_pct"],
         "cvd_bias": cvd_bias,
+        "cvd_status_label": cvd_view["status_label"],
         "cvd_conflict": conflict,
         "cvd_conflict_reason": (
             "CVD отрицательный против лонга." if preferred_side == "long" and conflict else
@@ -753,6 +761,9 @@ def _project_tag(metrics: Dict[str, Any], verdict: str) -> str:
     blockers = _fundamental_hard_blockers(metrics)
     if blockers:
         return _fundamental_quality_label(metrics, blockers)
+    primary_category = _primary_category(metrics)
+    if primary_category:
+        return "%s-категория" % primary_category
     tier = str(metrics.get("fdv_tier") or "")
     if tier in {"tiny", "small"}:
         return "Малая капитализация"
@@ -764,26 +775,91 @@ def _project_tag(metrics: Dict[str, Any], verdict: str) -> str:
 
 def _cvd_summary(derivatives: Dict[str, Any], preferred_side: str) -> Dict[str, Any]:
     cvd = _number(derivatives.get("cvd_base"))
+    buy_volume = _number(derivatives.get("cvd_buy_volume"))
+    sell_volume = _number(derivatives.get("cvd_sell_volume"))
+    view = _cvd_view(cvd, buy_volume, sell_volume, derivatives.get("cvd_status"))
     if cvd is None:
         return {
-            "label": "CVD: нет данных",
+            "label": "Нет данных",
+            "status_label": "Нет данных",
             "bias": "unknown",
-            "explanation": "CVD — баланс рыночных покупок и продаж; источник не вернул значение.",
+            "explanation": "Источник не вернул recent trades.",
             "value": None,
+            "buy_pct": None,
+            "sell_pct": None,
+            "source": "bybit_recent_trade",
         }
-    bias = derivatives.get("cvd_bias") or ("positive" if cvd > 0 else "negative" if cvd < 0 else "neutral")
-    if bias == "positive":
-        label = "CVD: покупатели давят"
-    elif bias == "negative":
-        label = "CVD: продавцы давят"
-    else:
-        label = "CVD: нейтрально"
+    bias = derivatives.get("cvd_bias") or view["bias"]
+    label = view["label"]
     conflict = derivatives.get("cvd_conflict")
     side_text = _side_label(preferred_side).lower()
-    explanation = "Баланс рыночных покупок и продаж%s." % (
+    explanation = "Рыночные покупки / рыночные продажи%s." % (
         "; конфликтует со стороной %s" % side_text if conflict else ""
     )
-    return {"label": label, "bias": bias, "explanation": explanation, "value": cvd}
+    return {
+        "label": label,
+        "status_label": view["status_label"],
+        "bias": bias,
+        "explanation": explanation,
+        "value": cvd,
+        "buy_pct": view["buy_pct"],
+        "sell_pct": view["sell_pct"],
+        "buy_volume": buy_volume,
+        "sell_volume": sell_volume,
+        "source": "bybit_recent_trade",
+    }
+
+
+def _cvd_view(cvd: Optional[float], buy_volume: Optional[float], sell_volume: Optional[float], status: Any = None) -> Dict[str, Any]:
+    if status == "unavailable" or cvd is None:
+        return {"status_label": "Нет данных", "label": "Нет данных", "bias": "unknown", "buy_pct": None, "sell_pct": None}
+    total = (buy_volume or 0.0) + (sell_volume or 0.0)
+    buy_pct = safe_pct(buy_volume, total)
+    sell_pct = safe_pct(sell_volume, total)
+    delta_pct = safe_pct(cvd, total)
+    if buy_pct is None and cvd is not None and cvd > 0:
+        status_label = "Покупатели доминируют"
+        bias = "positive"
+    elif buy_pct is None and cvd is not None and cvd < 0:
+        status_label = "Продавцы доминируют"
+        bias = "negative"
+    elif buy_pct is not None and (buy_pct >= 55.0 or (delta_pct is not None and delta_pct >= 10.0)):
+        status_label = "Покупатели доминируют"
+        bias = "positive"
+    elif sell_pct is not None and (sell_pct >= 55.0 or (delta_pct is not None and delta_pct <= -10.0)):
+        status_label = "Продавцы доминируют"
+        bias = "negative"
+    else:
+        status_label = "Баланс"
+        bias = "neutral"
+    ratio = "%s%% / %s%%" % (_fmt_score(buy_pct), _fmt_score(sell_pct)) if buy_pct is not None and sell_pct is not None else "нет долей"
+    return {
+        "status_label": status_label,
+        "label": "%s: %s, CVD %s" % (status_label, ratio, _fmt_signed_number(cvd)),
+        "bias": bias,
+        "buy_pct": buy_pct,
+        "sell_pct": sell_pct,
+    }
+
+
+def safe_pct(value: Optional[float], total: float) -> Optional[float]:
+    if value is None or total <= 0:
+        return None
+    return round((value / total) * 100.0, 2)
+
+
+def _fmt_signed_number(value: Optional[float]) -> str:
+    if value is None:
+        return "нет данных"
+    prefix = "+" if value > 0 else ""
+    abs_value = abs(value)
+    if abs_value >= 1_000_000:
+        body = "%.1fM" % (value / 1_000_000.0)
+    elif abs_value >= 1_000:
+        body = "%.1fK" % (value / 1_000.0)
+    else:
+        body = _fmt_score(value)
+    return prefix + body if not body.startswith("-") else body
 
 
 def _fundamental_decision_layer(stage: Dict[str, Any]) -> Dict[str, Any]:
@@ -836,6 +912,9 @@ def _fundamental_tag(metrics: Dict[str, Any], blockers: List[str], verdict: str)
     quality_label = _fundamental_quality_label(metrics, blockers)
     if quality_label != "Средний фундаментал":
         return quality_label
+    primary_category = _primary_category(metrics)
+    if primary_category:
+        return "%s-категория" % primary_category
     tier = str(metrics.get("fdv_tier") or "")
     if tier in {"tiny", "small"}:
         return "Малая капитализация"
@@ -845,11 +924,42 @@ def _fundamental_tag(metrics: Dict[str, Any], blockers: List[str], verdict: str)
     return quality_label
 
 
+def _primary_category(metrics: Dict[str, Any]) -> Optional[str]:
+    value = str(metrics.get("primary_category") or "").strip()
+    if value:
+        return value
+    categories = metrics.get("categories") or []
+    if not isinstance(categories, list):
+        categories = [str(categories)]
+    priority = [
+        ("AI", ("artificial intelligence", "ai ", " ai", "ai/")),
+        ("RWA", ("real world assets", "rwa")),
+        ("Privacy", ("privacy", "zero knowledge", "zk")),
+        ("DePIN", ("depin",)),
+        ("Infrastructure", ("infrastructure", "modular blockchain", "data availability")),
+        ("Meme", ("meme",)),
+        ("Gaming/GameFi", ("gaming", "gamefi", "play to earn")),
+        ("DeFi", ("defi", "decentralized finance", "dex", "lending", "yield")),
+    ]
+    normalized = [str(item).strip() for item in categories if str(item).strip()]
+    for label, terms in priority:
+        for category in normalized:
+            lowered = category.lower()
+            if any(term in lowered for term in terms):
+                return label
+    for category in normalized:
+        lowered = category.lower()
+        if not any(term in lowered for term in ("ecosystem", "chain", "airdrop", "portfolio", "made in", "hodler", "binance", "solana", "ethereum", "base", "layer 1", "layer 2")):
+            return category
+    return normalized[0] if normalized else None
+
+
 def _fundamental_quality_label(metrics: Dict[str, Any], blockers: List[str]) -> str:
     score = 50.0
     sector_blob = " ".join(
         str(item)
         for item in [
+            metrics.get("primary_category"),
             metrics.get("sector"),
             metrics.get("narrative"),
             ", ".join(str(value) for value in (metrics.get("categories") or []))
@@ -1053,6 +1163,11 @@ def _ta_trade_block(
         "strategy_label": _ta_tag(verdict, preferred_side),
         "cvd_summary": _cvd_summary(derivatives, preferred_side),
         "summary": ta.get("summary") or "ТА пока не дала отдельного вывода.",
+        "trend_summary": _ta_trend_summary(final or {}),
+        "levels_summary": _ta_levels_summary(final or {}),
+        "indicator_summary": _ta_indicator_summary(final or {}),
+        "setup": _ta_setup_payload(final or {}),
+        "conditions": _ta_entry_conditions(preferred_side, derivatives),
         "supports": supports[:3],
         "conflicts": conflicts[:3],
         "entry_conditions": _ta_entry_conditions(preferred_side, derivatives),
@@ -1084,11 +1199,11 @@ def _ta_entry_conditions(preferred_side: str, derivatives: Dict[str, Any]) -> Li
     if preferred_side == "short":
         conditions.append("Дождаться lower-high или слома локальной структуры вниз.")
         if cvd is None or cvd >= 0:
-            conditions.append("CVD должен стать отрицательным: продавец должен реально давить рынок.")
+            conditions.append("CVD должен показать доминирование продавцов.")
     elif preferred_side == "long":
         conditions.append("Дождаться возврата/ретеста уровня без провала структуры.")
         if cvd is None or cvd <= 0:
-            conditions.append("CVD должен стать положительным: покупатель должен подтвердить движение.")
+            conditions.append("CVD должен показать доминирование покупателей.")
     else:
         conditions.append("Сначала выбрать сторону: дождаться либо lower-high/слома вниз, либо возврата структуры вверх.")
         conditions.append("CVD и объем должны подтвердить выбранное направление.")
@@ -1096,7 +1211,27 @@ def _ta_entry_conditions(preferred_side: str, derivatives: Dict[str, Any]) -> Li
 
 
 def _ta_technical_context(final: Dict[str, Any]) -> Dict[str, str]:
-    signals = ((final.get("technical_analysis") or {}).get("signals") or {})
+    technical = final.get("technical_analysis") or {}
+    mtf = technical.get("multi_timeframe") or {}
+    levels = technical.get("levels") or {}
+    if mtf:
+        tf4 = mtf.get("240") or {}
+        tf1 = mtf.get("60") or {}
+        tf15 = mtf.get("15") or {}
+        return {
+            "structure": "%s тренд: %s; %s структура: %s" % (
+                tf4.get("label") or "4ч",
+                _trend_ru(tf4.get("trend")),
+                tf1.get("label") or "1ч",
+                _structure_mtf_ru(tf1.get("structure")),
+            ),
+            "rsi": _rsi_mtf_text(tf1, tf15),
+            "rsi_divergence": _divergence_mtf_text(mtf),
+            "levels": _levels_mtf_text(levels),
+            "volume": _volume_mtf_text(tf15, tf1),
+            "atr": _atr_mtf_text(tf15, tf1),
+        }
+    signals = (technical.get("signals") or {})
     structure = _signal_value(signals, "structure_break_hh_hl")
     rsi = _signal_value(signals, "rsi_signal")
     divergence = _signal_value(signals, "rsi_divergence")
@@ -1114,15 +1249,34 @@ def _ta_technical_context(final: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _ta_trade_map(preferred_side: str, setup_reason: str, final: Dict[str, Any]) -> Dict[str, str]:
+    technical = final.get("technical_analysis") or {}
+    setup = technical.get("trade_setup") or {}
+    if setup:
+        if setup.get("status") == "candidate" and setup.get("risk_reward") is not None:
+            take_profits = setup.get("take_profits") or []
+            return {
+                "entry": "ТВХ %s: %s" % (_side_label(str(setup.get("side") or preferred_side)).lower(), _fmt_price(setup.get("entry"))),
+                "stop": "SL: %s" % _fmt_price(setup.get("stop_loss")),
+                "take_profit": "TP: %s; R:R %s" % (_fmt_price(take_profits[0] if take_profits else None), _fmt_score(setup.get("risk_reward"))),
+                "checklist": "Перед входом: дождаться ретеста на младшем ТФ, подтверждения объема и CVD в сторону сделки.",
+                "invalidation_note": str(setup.get("reason") or ""),
+            }
+        return {
+            "entry": "Нет активной ТВХ: %s" % (setup.get("reason") or "уровни или структура не дают R:R >= 1:3."),
+            "stop": "SL не фиксируем без активной ТВХ.",
+            "take_profit": "TP не фиксируем без цели с R:R >= 1:3.",
+            "checklist": "Перед входом: старший ТФ, уровень, RSI/дивергенция, объем и CVD должны совпасть.",
+            "invalidation_note": str(setup.get("reason") or ""),
+        }
     trade_plan = final.get("trade_plan") or {}
     if preferred_side == "short":
         fallback_entry = "Ждать lower-high, слом локальной поддержки и отрицательный CVD."
         fallback_stop = "SL выше lower-high или зоны возврата цены над сломанной структурой."
-        fallback_tp = "TP у ближайшей поддержки/зоны ликвидности; часть позиции закрывать при R:R от 1:2."
+        fallback_tp = "TP у ближайшей поддержки/зоны ликвидности; сетап активен только при R:R >= 1:3."
     elif preferred_side == "long":
         fallback_entry = "Ждать ретест уровня, удержание структуры и положительный CVD."
         fallback_stop = "SL ниже ретеста/свипа с учетом ATR."
-        fallback_tp = "TP у локального high/зоны ликвидности; часть позиции закрывать при R:R от 1:2."
+        fallback_tp = "TP у локального high/зоны ликвидности; сетап активен только при R:R >= 1:3."
     else:
         fallback_entry = "Сначала выбрать сторону: структура, объем и CVD должны совпасть."
         fallback_stop = "SL ставить за локальный экстремум после подтвержденной ТВХ."
@@ -1131,9 +1285,121 @@ def _ta_trade_map(preferred_side: str, setup_reason: str, final: Dict[str, Any])
         "entry": trade_plan.get("entry") or fallback_entry,
         "stop": trade_plan.get("stop_loss") or fallback_stop,
         "take_profit": trade_plan.get("take_profit_1") or trade_plan.get("take_profit") or fallback_tp,
-        "checklist": "RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD.",
+        "checklist": "Перед входом: RSI/дивергенции, структура старшего ТФ, локальные поддержка/сопротивление, объем и CVD.",
         "invalidation_note": setup_reason or "",
     }
+
+
+def _ta_setup_payload(final: Dict[str, Any]) -> Dict[str, Any]:
+    technical = final.get("technical_analysis") or {}
+    setup = technical.get("trade_setup") or {}
+    if not isinstance(setup, dict):
+        return {}
+    return setup
+
+
+def _ta_trend_summary(final: Dict[str, Any]) -> str:
+    mtf = ((final.get("technical_analysis") or {}).get("multi_timeframe") or {})
+    if not mtf:
+        return ""
+    tf4 = mtf.get("240") or {}
+    tf1 = mtf.get("60") or {}
+    return "%s тренд: %s; %s структура: %s." % (
+        tf4.get("label") or "4ч",
+        _trend_ru(tf4.get("trend")),
+        tf1.get("label") or "1ч",
+        _structure_mtf_ru(tf1.get("structure")),
+    )
+
+
+def _ta_levels_summary(final: Dict[str, Any]) -> str:
+    levels = ((final.get("technical_analysis") or {}).get("levels") or {})
+    return _levels_mtf_text(levels)
+
+
+def _ta_indicator_summary(final: Dict[str, Any]) -> str:
+    mtf = ((final.get("technical_analysis") or {}).get("multi_timeframe") or {})
+    if not mtf:
+        return ""
+    return "%s; %s; %s." % (_rsi_mtf_text(mtf.get("60") or {}, mtf.get("15") or {}), _divergence_mtf_text(mtf), _atr_mtf_text(mtf.get("15") or {}, mtf.get("60") or {}))
+
+
+def _trend_ru(value: Any) -> str:
+    return {
+        "uptrend": "восходящий",
+        "downtrend": "нисходящий",
+        "range": "боковик",
+    }.get(str(value or ""), "нет данных")
+
+
+def _structure_mtf_ru(value: Any) -> str:
+    return {
+        "higher_high_higher_low": "HH/HL, бычья структура",
+        "lower_high_lower_low": "LH/LL, медвежья структура",
+        "range": "диапазон",
+    }.get(str(value or ""), "нет данных")
+
+
+def _rsi_mtf_text(tf1: Dict[str, Any], tf15: Dict[str, Any]) -> str:
+    rows = []
+    for data in (tf1, tf15):
+        rsi_payload = data.get("rsi") or {}
+        value = rsi_payload.get("value")
+        if value is not None:
+            rows.append("RSI %s: %s, %s" % (rsi_payload.get("timeframe") or data.get("label") or "ТФ", _fmt_score(value), rsi_payload.get("zone") or "нет зоны"))
+    return "; ".join(rows) if rows else "RSI: нет данных"
+
+
+def _divergence_mtf_text(mtf: Dict[str, Dict[str, Any]]) -> str:
+    parts = []
+    for key in ("240", "60", "15"):
+        data = mtf.get(key) or {}
+        divergence = data.get("divergence") or {}
+        label = divergence.get("timeframe") or data.get("label") or key
+        value = str(divergence.get("value") or "none")
+        parts.append("RSI divergence %s: %s" % (label, _divergence_signal_ru(value)))
+    return "; ".join(parts) if parts else "RSI divergence: нет данных"
+
+
+def _levels_mtf_text(levels: Dict[str, Any]) -> str:
+    supports = [value for value in levels.get("supports") or [] if value is not None]
+    resistances = [value for value in levels.get("resistances") or [] if value is not None]
+    strong = levels.get("strong_levels") or []
+    support = supports[-1] if supports else None
+    resistance = resistances[0] if resistances else None
+    suffix = ""
+    if strong:
+        suffix = "; сильный уровень: %s" % _fmt_price((strong[0] or {}).get("price"))
+    if support is None and resistance is None:
+        return "Уровни: нет числовых support/resistance"
+    return "Поддержка: %s; сопротивление: %s%s" % (_fmt_price(support), _fmt_price(resistance), suffix)
+
+
+def _volume_mtf_text(tf15: Dict[str, Any], tf1: Dict[str, Any]) -> str:
+    for data in (tf15, tf1):
+        volume = data.get("volume") or {}
+        if volume.get("ratio") is not None:
+            return "Объем %s: %sx к базе" % (data.get("label") or volume.get("timeframe") or "ТФ", _fmt_score(volume.get("ratio")))
+    return "Объем: нет данных"
+
+
+def _atr_mtf_text(tf15: Dict[str, Any], tf1: Dict[str, Any]) -> str:
+    for data in (tf15, tf1):
+        atr_payload = data.get("atr") or {}
+        if atr_payload.get("value") is not None:
+            return "ATR %s: %s (%s%% цены)" % (atr_payload.get("timeframe") or data.get("label") or "ТФ", _fmt_price(atr_payload.get("value")), _fmt_score(atr_payload.get("pct")))
+    return "ATR: нет данных"
+
+
+def _fmt_price(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "нет данных"
+    if abs(number) >= 100:
+        return ("%.2f" % number).rstrip("0").rstrip(".")
+    if abs(number) >= 1:
+        return ("%.4f" % number).rstrip("0").rstrip(".")
+    return ("%.8f" % number).rstrip("0").rstrip(".")
 
 
 def _structure_signal_ru(value: Any) -> str:
@@ -1141,7 +1407,7 @@ def _structure_signal_ru(value: Any) -> str:
         "bearish_break": "слом структуры вниз",
         "bullish_hh_hl": "структура higher-high / higher-low",
         "bullish_sweep_reclaim": "снятие ликвидности и возврат",
-    }.get(str(value), "структура не подтверждена")
+    }.get(str(value), "структура: нет подтвержденного HH/HL или LH/LL")
 
 
 def _rsi_signal_ru(value: Any) -> str:
@@ -1194,28 +1460,33 @@ def _social_trade_block(
     social_metrics = sentiment.get("metrics") or {}
     chart_metrics = research_charts.get("metrics") or {}
     scenario = chart_metrics.get("scenario") or {}
-    scenario_ru = _scenario_ru(scenario.get("code"))
+    fundamental_metrics = fundamentals.get("metrics") or {}
     velocity = _number(social_metrics.get("social_volume_velocity_ratio"))
+    price_change = _number(fundamental_metrics.get("price_change_24h"))
+    status = _social_status(scenario.get("code"), velocity, price_change)
+    scenario_ru = _scenario_ru(status["code"])
     if scenario.get("code") in {"narrative", "early_narrative"} and velocity is not None and velocity >= 1.35:
         verdict = "ok"
         impact = "Социальный импульс можно учитывать, если Bybit объем подтвердит движение."
-    elif scenario.get("code") in {"fake_pump", "exhaustion_late_hype"}:
+    elif status["code"] in {"growth_without_social_confirmation", "correction_without_social_panic", "late_hype"}:
         verdict = "risk"
-        impact = "Социальный сигнал выглядит поздним или подозрительным: не догонять движение."
+        impact = "Соцблок не дает самостоятельного входа: ждать синхронизации с объемом и структурой."
     elif velocity is not None and velocity < 1.0:
         verdict = "risk"
         impact = "Упоминания ниже базы: соцблок не усиливает сделку."
     else:
         verdict = "watch"
         impact = "Соцблок нейтрален: ждать синхронизации упоминаний, цены и объема."
-    fundamental_metrics = fundamentals.get("metrics") or {}
-    posts = fundamental_metrics.get("top_posts_ru") or fundamental_metrics.get("top_posts") or []
+    posts = _structured_social_posts(fundamental_metrics)
     return {
         "verdict": verdict,
         "verdict_label": {"ok": "Подтверждает", "risk": "Риск", "watch": "Наблюдать"}[verdict],
+        "status_code": status["code"],
+        "status_label": scenario_ru["label"],
+        "status_reason": status["reason"],
         "tag": scenario_ru["label"],
         "scenario_label_ru": scenario_ru["label"],
-        "summary": scenario_ru["summary"],
+        "summary": status["reason"] or scenario_ru["summary"],
         "chart_explanation": (
             "Все линии нормализованы к шкале 0-100 внутри выбранного окна; это не цена в USDT и не абсолютный объем. "
             "Горизонтальная ось — часы. Маркеры M/P/V показывают первый значимый всплеск упоминаний, цены и объема."
@@ -1226,8 +1497,10 @@ def _social_trade_block(
             "velocity": "Скорость — во сколько раз текущие упоминания выше или ниже базы.",
             "window": "Окно — период сравнения, обычно 1 час для velocity и до 48 часов для графика.",
         },
-        "translated_posts": [str(item) for item in posts[:5] if item],
+        "translated_posts": [str(item.get("translated_ru") or item.get("original_text")) for item in posts[:5] if item.get("translated_ru") or item.get("original_text")],
+        "top_posts": posts[:5],
         "top_posts_summary_ru": fundamental_metrics.get("top_posts_summary_ru") or "",
+        "alt_rank": _alt_rank_payload(fundamental_metrics),
         "trade_impact": _social_next_step(research_charts) if chart_metrics else impact,
         "velocity_ratio": velocity,
         "velocity_level": _velocity_level(velocity),
@@ -1238,6 +1511,55 @@ def _social_trade_block(
         "window_label": "Окно замера",
         "preferred_side": preferred_side,
     }
+
+
+def _social_status(code: Any, velocity: Optional[float], price_change: Optional[float]) -> Dict[str, str]:
+    base = str(code or "mixed")
+    velocity_text = "нет данных" if velocity is None else "%.2fx к базе" % velocity
+    price_text = "нет данных" if price_change is None else "%+.2f%% за 24ч" % price_change
+    if base == "early_narrative":
+        return {"code": "early_social_signal", "reason": "Упоминания растут раньше цены/объема; цена %s, скорость упоминаний %s." % (price_text, velocity_text)}
+    if base == "narrative":
+        return {"code": "confirmed_narrative", "reason": "Упоминания пришли первыми, затем цена и объем подтвердили движение; цена %s, скорость %s." % (price_text, velocity_text)}
+    if base == "insider_pump":
+        return {"code": "price_before_social", "reason": "Цена двинулась раньше публичного внимания; цена %s, скорость упоминаний %s." % (price_text, velocity_text)}
+    if base == "exhaustion_late_hype":
+        return {"code": "late_hype", "reason": "Соцсети догоняют уже прошедшее движение; цена %s, скорость упоминаний %s." % (price_text, velocity_text)}
+    if base == "fake_pump" and price_change is not None and price_change < 0:
+        return {"code": "correction_without_social_panic", "reason": "Цена корректируется без соцпаники; цена %s, скорость упоминаний %s." % (price_text, velocity_text)}
+    if base == "fake_pump":
+        return {"code": "growth_without_social_confirmation", "reason": "Цена растет без нормального подтверждения упоминаниями и объемом; цена %s, скорость %s." % (price_text, velocity_text)}
+    if base == "insufficient_social_data":
+        return {"code": "insufficient_social_data", "reason": "LunarCrush не дал достаточную часовую историю; цена %s." % price_text}
+    if base == "insufficient_market_data":
+        return {"code": "insufficient_market_data", "reason": "Bybit-истории недостаточно для честного сравнения цены, объема и упоминаний."}
+    return {"code": "mixed", "reason": "Нет чистого лидерства соцсетей, цены или объема; цена %s, скорость упоминаний %s." % (price_text, velocity_text)}
+
+
+def _alt_rank_payload(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    value = _number(metrics.get("alt_rank"))
+    return {
+        "value": int(value) if value is not None else None,
+        "captured_at": metrics.get("alt_rank_captured_at"),
+        "source": metrics.get("alt_rank_source") or ("lunarcrush" if value is not None else "нет данных"),
+    }
+
+
+def _structured_social_posts(metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
+    structured = metrics.get("top_posts_structured") or []
+    if isinstance(structured, list) and structured:
+        return [item for item in structured if isinstance(item, dict)]
+    originals = metrics.get("top_posts") or []
+    translated = metrics.get("top_posts_ru") or []
+    posts: List[Dict[str, Any]] = []
+    for index, original in enumerate(originals[:5]):
+        posts.append({
+            "original_text": str(original),
+            "translated_ru": str(translated[index]) if index < len(translated) else "",
+            "creator": "",
+            "url": "",
+        })
+    return posts
 
 
 def _velocity_level(value: Optional[float]) -> str:
@@ -1255,8 +1577,10 @@ def _social_next_step(stage: Dict[str, Any]) -> str:
     code = scenario.get("code")
     if code in {"narrative", "early_narrative"}:
         return "Соцсигнал можно учитывать только после подтверждения объёмом Bybit и ретеста."
-    if code in {"fake_pump", "exhaustion_late_hype"}:
-        return "Не догонять движение: соцсигнал запаздывает или не подтвержден объёмом."
+    if code == "fake_pump":
+        return "Не торговать только по соцсигналу: определить, это рост без подтверждения или коррекция без паники."
+    if code == "exhaustion_late_hype":
+        return "Не догонять движение: соцсигнал запаздывает."
     if code == "insider_pump":
         return "Цена пришла раньше публичного внимания: ждать ретест, не входить по FOMO."
     if code == "insufficient_social_data":
@@ -1266,12 +1590,36 @@ def _social_next_step(stage: Dict[str, Any]) -> str:
 
 def _scenario_ru(code: Any) -> Dict[str, str]:
     return {
+        "early_social_signal": {
+            "label": "Соцсигнал раньше рынка",
+            "summary": "Упоминания растут раньше цены и объема. Это watch-сигнал до подтверждения рынком.",
+        },
+        "confirmed_narrative": {
+            "label": "Нарратив подтвержден",
+            "summary": "Упоминания пришли первыми, затем цена и объем подтвердили движение.",
+        },
+        "price_before_social": {
+            "label": "Цена раньше соцсетей",
+            "summary": "Цена двинулась раньше публичного внимания; вход только после ретеста.",
+        },
+        "growth_without_social_confirmation": {
+            "label": "Рост без соцподтверждения",
+            "summary": "Цена растет без нормального подтверждения упоминаниями и объемом.",
+        },
+        "correction_without_social_panic": {
+            "label": "Коррекция без соцпаники",
+            "summary": "Цена корректируется, а упоминания не ускоряются; это не памп, а слабая social-реакция.",
+        },
+        "late_hype": {
+            "label": "Поздний хайп",
+            "summary": "Соцсети догоняют уже прошедшее движение. Риск позднего входа высокий.",
+        },
         "early_narrative": {
-            "label": "Ранний соцсигнал",
+            "label": "Соцсигнал раньше рынка",
             "summary": "Упоминания растут раньше цены и объема. Это сигнал для наблюдения, вход только после подтверждения рынком.",
         },
         "narrative": {
-            "label": "Подтвержденный нарратив",
+            "label": "Нарратив подтвержден",
             "summary": "Упоминания пришли первыми, затем цена и объем подтвердили движение.",
         },
         "exhaustion_late_hype": {
@@ -1279,7 +1627,7 @@ def _scenario_ru(code: Any) -> Dict[str, str]:
             "summary": "Цена уже прошла движение, а соцсети догоняют. Риск позднего входа высокий.",
         },
         "fake_pump": {
-            "label": "Подозрительный памп",
+            "label": "Рост без соцподтверждения",
             "summary": "Цена двинулась без нормального подтверждения объемом и соцсетями.",
         },
         "insider_pump": {

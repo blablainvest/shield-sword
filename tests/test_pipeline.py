@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from hype_radar.engine import HypeRadarEngine, ScanConfig, _manipulation_status
 from hype_radar.models import Candle, CvdStats, Instrument, LongShortRatio, OrderbookStats, Ticker
-from hype_radar.storage import RadarStore, _preferred_side, _research_card, _summary, _why_it_moved, lifecycle_label, manipulation_level
+from hype_radar.storage import RadarStore, _preferred_side, _research_card, _social_trade_block, _summary, _why_it_moved, lifecycle_label, manipulation_level
 from hype_radar.token_intelligence import (
     MppTokenIntelligenceClient,
     NullTokenIntelligenceClient,
@@ -15,6 +15,7 @@ from hype_radar.token_intelligence import (
     fdv_tier,
     fundamentals_stage_payload,
     market_cap_to_fdv_profile,
+    primary_project_category,
     select_coingecko_identity,
     social_stage_payload,
 )
@@ -68,6 +69,7 @@ class FakeBybit:
             Instrument("BTCUSDT", "BTC", "USDT", "Trading", "LinearPerpetual", 1, 0.1),
             Instrument("DWFUSDT", "DWF", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
             Instrument("DROPUSDT", "DROP", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
+            Instrument("PENGUUSDT", "PENGU", "USDT", "Trading", "LinearPerpetual", 1, 0.0001),
         ]
 
     def tickers(self):
@@ -75,12 +77,14 @@ class FakeBybit:
             ticker("BTCUSDT", price=100000, pct24=0.05, turnover=100_000_000),
             ticker("DWFUSDT", price=self.closes[-1], pct24=0.12, turnover=8_000_000),
             ticker("DROPUSDT", price=self.closes[-1], pct24=-0.18, turnover=9_000_000),
+            ticker("PENGUUSDT", price=self.closes[-1], pct24=-0.059, turnover=9_000_000),
         ]
 
     def long_short_ratio(self, symbol, period="1h", category="linear"):
         ratios = {
             "DWFUSDT": LongShortRatio(symbol, 0.62, 0.38, 123456),
             "DROPUSDT": LongShortRatio(symbol, 0.41, 0.59, 123456),
+            "PENGUUSDT": LongShortRatio(symbol, 0.50, 0.50, 123456),
         }
         return ratios.get(symbol)
 
@@ -322,6 +326,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("final_decision", decision)
         self.assertEqual(set(decision["blocks"].keys()), {"project", "fundamental", "social", "ta"})
         self.assertIn("cvd_summary", decision["blocks"]["project"])
+        self.assertEqual(decision["blocks"]["project"]["cvd_summary"]["status_label"], "Покупатели доминируют")
+        self.assertIn("buy_pct", decision["blocks"]["project"]["cvd_summary"])
         self.assertIn(decision["blocks"]["fundamental"]["verdict"], {"ok", "risk", "blocker"})
         self.assertNotEqual(decision["blocks"]["fundamental"]["verdict_label"], "Блокер")
         self.assertIn(
@@ -331,10 +337,14 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("tag", decision["blocks"]["fundamental"])
         self.assertIn("scenario_label_ru", decision["blocks"]["social"])
         self.assertIn("velocity_level", decision["blocks"]["social"])
+        self.assertIn("alt_rank", decision["blocks"]["social"])
         self.assertNotIn("cvd_note", decision["blocks"]["social"])
         self.assertIn("entry_conditions", decision["blocks"]["ta"])
         self.assertIn("technical_context", decision["blocks"]["ta"])
         self.assertIn("trade_map", decision["blocks"]["ta"])
+        self.assertIn("trend_summary", decision["blocks"]["ta"])
+        self.assertIn("levels_summary", decision["blocks"]["ta"])
+        self.assertIn("setup", decision["blocks"]["ta"])
         self.assertIn("tag", decision["blocks"]["ta"])
         self.assertNotIn("Watch only", decision["verdict_label"])
 
@@ -352,6 +362,36 @@ class PipelineTests(unittest.TestCase):
         derivatives = {"cvd_bias": "negative"}
 
         self.assertEqual(_preferred_side(final, {"metrics": {}}, research_charts, derivatives), "short")
+
+    def test_primary_category_prefers_meme_over_ecosystem_noise(self):
+        self.assertEqual(primary_project_category(["BNB Chain Ecosystem", "Solana Ecosystem", "Meme"]), "Meme")
+
+    def test_social_status_uses_correction_when_price_falls_without_social_panic(self):
+        metrics = {
+            "primary_category": primary_project_category(["BNB Chain Ecosystem", "Solana Ecosystem", "Meme"]),
+            "price_change_24h": -5.9,
+            "alt_rank": 37,
+            "top_posts_structured": [
+                {
+                    "original_text": "$PENGU looks ready to bounce",
+                    "translated_ru": "PENGU готовится к отскоку.",
+                    "creator": "trader",
+                    "url": "https://x.com/example/status/1",
+                }
+            ],
+        }
+        social = _social_trade_block(
+            {"metrics": {"social_volume_velocity_ratio": 0.64, "social_volume_current": 398, "social_volume_baseline": 621}},
+            {"metrics": {"scenario": {"code": "fake_pump"}, "window_hours": 48}},
+            {"metrics": metrics},
+            "neutral",
+            {},
+        )
+
+        self.assertEqual(metrics["primary_category"], "Meme")
+        self.assertEqual(social["status_label"], "Коррекция без соцпаники")
+        self.assertEqual(social["alt_rank"]["value"], 37)
+        self.assertEqual(social["top_posts"][0]["original_text"], "$PENGU looks ready to bounce")
 
     def test_preferred_side_is_neutral_without_edge(self):
         final = {"direction_bias": "LONG", "verdict": "WATCH_ONLY", "long_score": 50, "short_score": 51}
