@@ -554,20 +554,32 @@ function primaryCategory(metrics = {}) {
   const value = String(metrics.primary_category || "").trim();
   if (value) return value;
   const categories = Array.isArray(metrics.categories) ? metrics.categories.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  const meaningful = categories.filter((category) => !isNoiseCategory(category));
+  const candidates = meaningful.length ? meaningful : categories;
   const priority = [
-    ["AI", ["artificial intelligence", "ai ", " ai", "ai/"]],
+    ["Meme", ["meme"]],
+    ["AI", ["artificial intelligence", "ai"]],
     ["RWA", ["real world assets", "rwa"]],
     ["Privacy", ["privacy", "zero knowledge", "zk"]],
     ["DePIN", ["depin"]],
     ["Infrastructure", ["infrastructure", "modular blockchain", "data availability"]],
-    ["Meme", ["meme"]],
     ["Gaming/GameFi", ["gaming", "gamefi", "play to earn"]],
     ["DeFi", ["defi", "decentralized finance", "dex", "lending", "yield"]]
   ];
   for (const [label, terms] of priority) {
-    if (categories.some((category) => terms.some((term) => category.toLowerCase().includes(term)))) return label;
+    if (candidates.some((category) => terms.some((term) => categoryMatchesTerm(category, term)))) return label;
   }
-  return categories.find((category) => !/(ecosystem|chain|airdrop|portfolio|made in|hodler|binance|solana|ethereum|base|layer 1|layer 2)/i.test(category)) || categories[0] || "";
+  return candidates.find((category) => !isNoiseCategory(category)) || categories[0] || "";
+}
+
+function categoryMatchesTerm(category, term) {
+  const lowered = String(category || "").toLowerCase();
+  if (term === "ai") return /\bai\b/.test(lowered);
+  return lowered.includes(term);
+}
+
+function isNoiseCategory(category) {
+  return /(ecosystem|chain|airdrop|portfolio|made in|hodler|binance|solana|ethereum|base|abstract|layer 1|layer 2)/i.test(String(category || ""));
 }
 
 function fallbackFundamentalQuality(metrics, blockers = []) {

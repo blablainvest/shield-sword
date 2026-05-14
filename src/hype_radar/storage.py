@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -931,27 +932,39 @@ def _primary_category(metrics: Dict[str, Any]) -> Optional[str]:
     categories = metrics.get("categories") or []
     if not isinstance(categories, list):
         categories = [str(categories)]
+    normalized = [str(item).strip() for item in categories if str(item).strip()]
+    meaningful = [item for item in normalized if not _is_noise_category(item)]
+    candidates = meaningful or normalized
     priority = [
-        ("AI", ("artificial intelligence", "ai ", " ai", "ai/")),
+        ("Meme", ("meme",)),
+        ("AI", ("artificial intelligence", "ai")),
         ("RWA", ("real world assets", "rwa")),
         ("Privacy", ("privacy", "zero knowledge", "zk")),
         ("DePIN", ("depin",)),
         ("Infrastructure", ("infrastructure", "modular blockchain", "data availability")),
-        ("Meme", ("meme",)),
         ("Gaming/GameFi", ("gaming", "gamefi", "play to earn")),
         ("DeFi", ("defi", "decentralized finance", "dex", "lending", "yield")),
     ]
-    normalized = [str(item).strip() for item in categories if str(item).strip()]
     for label, terms in priority:
-        for category in normalized:
-            lowered = category.lower()
-            if any(term in lowered for term in terms):
+        for category in candidates:
+            if any(_category_matches_term(category, term) for term in terms):
                 return label
-    for category in normalized:
-        lowered = category.lower()
-        if not any(term in lowered for term in ("ecosystem", "chain", "airdrop", "portfolio", "made in", "hodler", "binance", "solana", "ethereum", "base", "layer 1", "layer 2")):
+    for category in candidates:
+        if not _is_noise_category(category):
             return category
     return normalized[0] if normalized else None
+
+
+def _category_matches_term(category: str, term: str) -> bool:
+    lowered = category.lower()
+    if term == "ai":
+        return bool(re.search(r"\bai\b", lowered))
+    return term in lowered
+
+
+def _is_noise_category(category: str) -> bool:
+    lowered = category.lower()
+    return any(term in lowered for term in ("ecosystem", "chain", "airdrop", "portfolio", "made in", "hodler", "binance", "solana", "ethereum", "base", "abstract", "layer 1", "layer 2"))
 
 
 def _fundamental_quality_label(metrics: Dict[str, Any], blockers: List[str]) -> str:

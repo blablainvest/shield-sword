@@ -1408,44 +1408,55 @@ def primary_project_category(categories: List[str]) -> Optional[str]:
     cleaned = [item for item in cleaned if item]
     if not cleaned:
         return None
+    meaningful = [item for item in cleaned if not is_noise_category(item)]
+    candidates = meaningful or cleaned
     priority = [
-        ("AI", ("artificial intelligence", "ai ", " ai", "ai/")),
+        ("Meme", ("meme",)),
+        ("AI", ("artificial intelligence", "ai")),
         ("RWA", ("real world assets", "rwa")),
         ("Privacy", ("privacy", "zero knowledge", "zk")),
         ("DePIN", ("depin",)),
         ("Infrastructure", ("infrastructure", "modular blockchain", "data availability")),
-        ("Meme", ("meme",)),
         ("Gaming/GameFi", ("gaming", "gamefi", "play to earn", "nft gaming")),
         ("DeFi", ("defi", "decentralized finance", "dex", "lending", "yield")),
     ]
     for label, terms in priority:
-        for category in cleaned:
-            lowered = category.lower()
-            if any(term in lowered for term in terms):
+        for category in candidates:
+            if any(category_matches_term(category, term) for term in terms):
                 return label
-    for category in cleaned:
-        lowered = category.lower()
-        if not any(
-            term in lowered
-            for term in (
-                "ecosystem",
-                "chain",
-                "airdrop",
-                "airdrop",
-                "portfolio",
-                "made in",
-                "hodler",
-                "binance",
-                "solana",
-                "ethereum",
-                "base",
-                "abstract",
-                "layer 1",
-                "layer 2",
-            )
-        ):
+    for category in candidates:
+        if not is_noise_category(category):
             return category
     return cleaned[0]
+
+
+def category_matches_term(category: str, term: str) -> bool:
+    lowered = category.lower()
+    if term == "ai":
+        return bool(re.search(r"\bai\b", lowered))
+    return term in lowered
+
+
+def is_noise_category(category: str) -> bool:
+    lowered = category.lower()
+    return any(
+        term in lowered
+        for term in (
+            "ecosystem",
+            "chain",
+            "airdrop",
+            "portfolio",
+            "made in",
+            "hodler",
+            "binance",
+            "solana",
+            "ethereum",
+            "base",
+            "abstract",
+            "layer 1",
+            "layer 2",
+        )
+    )
 
 
 def category_quality_label(category: Optional[str]) -> str:

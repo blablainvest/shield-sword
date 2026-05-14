@@ -365,6 +365,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_primary_category_prefers_meme_over_ecosystem_noise(self):
         self.assertEqual(primary_project_category(["BNB Chain Ecosystem", "Solana Ecosystem", "Meme"]), "Meme")
+        self.assertEqual(primary_project_category(["BNB Chain Ecosystem", "Meme", "Binance HODLer Airdrops"]), "Meme")
 
     def test_social_status_uses_correction_when_price_falls_without_social_panic(self):
         metrics = {
